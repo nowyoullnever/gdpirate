@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
 import asyncio
-from collections import defaultdict
+from enum import Enum
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -21,6 +21,11 @@ from gdpirate.core.resource_types import (
 logger = logging.getLogger(__name__)
 
 
+class AccessCheckPolicy(str, Enum):
+    IMMEDIATE = "IMMEDIATE"
+    DEFERRED = "DEFERRED"
+
+
 @dataclass(frozen=True)
 class IngestionResult:
     valid: bool
@@ -35,7 +40,8 @@ class IngestionResult:
 
 
 class IngestionService:
-    _locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+    _lock_stripes = [asyncio.Lock() for _ in range(1024)]
+
     def __init__(
         self,
         session: AsyncSession,
@@ -50,15 +56,23 @@ class IngestionService:
         self.check_access = check_access
 
     async def ingest(self, candidate: CandidateLink) -> IngestionResult:
+        return await self.ingest_with_policy(candidate, AccessCheckPolicy.IMMEDIATE)
+
+    async def ingest_with_policy(
+        self, candidate: CandidateLink, access_policy: AccessCheckPolicy
+    ) -> IngestionResult:
         parsed = parse_google_url(candidate.raw_url)
         if not parsed:
             return IngestionResult(valid=False, message="invalid_google_url")
 
-        async with self._locks[(parsed.provider, parsed.resource_id)]:
-            return await self._ingest_locked(candidate, parsed)
+        async with self._lock_for(parsed.provider, parsed.resource_id):
+            return await self._ingest_locked(candidate, parsed, access_policy)
 
     async def _ingest_locked(
-        self, candidate: CandidateLink, parsed: ParsedGoogleUrl
+        self,
+        candidate: CandidateLink,
+        parsed: ParsedGoogleUrl,
+        access_policy: AccessCheckPolicy,
     ) -> IngestionResult:
         existing = await self._find_existing(parsed)
         created = existing is None
@@ -72,46 +86,28 @@ class IngestionService:
         )
 
         if existing is None:
-            self.session.add(link)
-        else:
-            if not existing.source_url and candidate.source_url:
-                existing.source_name = candidate.source_name
-                existing.source_url = candidate.source_url
-            if should_upgrade_resource_type(existing.resource_type, parsed.resource_type):
-                existing.resource_type = parsed.resource_type
-                existing.canonical_url = canonical_url(
-                    parsed.resource_type, parsed.resource_id
-                )
-            elif is_contradictory_type(existing.resource_type, parsed.resource_type):
-                logger.warning(
-                    "conflicting resource types for %s/%s: existing=%s discovered=%s",
-                    parsed.provider,
-                    parsed.resource_id,
-                    existing.resource_type.value,
-                    parsed.resource_type.value,
-                )
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(link)
+                    await self.session.flush()
+            except IntegrityError:
+                existing = await self._find_existing(parsed)
+                if existing is None:
+                    raise
+                link = existing
+                created = False
+        if not created:
+            self._merge_discovery(link, candidate, parsed)
 
-        if self.check_access and self._should_check_access(link, created):
+        if (
+            access_policy == AccessCheckPolicy.IMMEDIATE
+            and self.check_access
+            and self._should_check_access(link, created)
+        ):
             link.access_status = await self.access_checker.check(link.canonical_url)
             link.last_checked_at = datetime.now(UTC)
 
-        try:
-            await self.session.flush()
-        except IntegrityError:
-            await self.session.rollback()
-            existing = await self._find_existing(parsed)
-            if existing is None:
-                raise
-            return IngestionResult(
-                valid=True,
-                created=False,
-                duplicate=True,
-                access_status=existing.access_status,
-                canonical_url=existing.canonical_url,
-                provider=existing.provider,
-                resource_id=existing.resource_id,
-                access_check_needed=self._should_check_access(existing, False),
-            )
+        await self.session.flush()
         return IngestionResult(
             valid=True,
             created=created,
@@ -120,8 +116,19 @@ class IngestionService:
             canonical_url=link.canonical_url,
             provider=link.provider,
             resource_id=link.resource_id,
-            access_check_needed=self._should_check_access(link, created),
+            access_check_needed=(
+                access_policy == AccessCheckPolicy.IMMEDIATE
+                and self._should_check_access(link, created)
+            ),
         )
+
+    @classmethod
+    def lock_count(cls) -> int:
+        return len(cls._lock_stripes)
+
+    @classmethod
+    def _lock_for(cls, provider: str, resource_id: str) -> asyncio.Lock:
+        return cls._lock_stripes[hash((provider, resource_id)) % len(cls._lock_stripes)]
 
     async def update_access_status(
         self, provider: str, resource_id: str, status: AccessStatus
@@ -147,6 +154,24 @@ class IngestionService:
         return datetime.now(UTC) - checked_at >= timedelta(
             hours=self.settings.access_recheck_hours
         )
+
+    def _merge_discovery(
+        self, link: DriveLink, candidate: CandidateLink, parsed: ParsedGoogleUrl
+    ) -> None:
+        if not link.source_url and candidate.source_url:
+            link.source_name = candidate.source_name
+            link.source_url = candidate.source_url
+        if should_upgrade_resource_type(link.resource_type, parsed.resource_type):
+            link.resource_type = parsed.resource_type
+            link.canonical_url = canonical_url(parsed.resource_type, parsed.resource_id)
+        elif is_contradictory_type(link.resource_type, parsed.resource_type):
+            logger.warning(
+                "conflicting resource types for %s/%s: existing=%s discovered=%s",
+                parsed.provider,
+                parsed.resource_id,
+                link.resource_type.value,
+                parsed.resource_type.value,
+            )
 
     async def _find_existing(self, parsed: ParsedGoogleUrl) -> DriveLink | None:
         result = await self.session.execute(

@@ -54,6 +54,10 @@ uv run gdpirate collect hackernews --max-items 10
 uv run gdpirate collect all --max-items-per-source 10
 uv run gdpirate collect fediverse --max-items 20
 uv run gdpirate collect nostr --max-items 20
+uv run gdpirate collect gdurl --max-items 10
+uv run gdpirate collect dedigger --max-items 10
+uv run gdpirate validate --max-items 100 --concurrency 3
+uv run gdpirate collector-state gdurl
 uv run gdpirate live-access-check
 ```
 
@@ -69,6 +73,7 @@ The normal test suite uses mocked HTTP responses for access checks. Optional liv
 
 Future collectors emit `CandidateLink` objects and call the central ingestion service. Collectors do not parse Google URLs and do not talk to SQLAlchemy directly.
 The collector set discovers links from Hacker News, anonymous Bluesky search when available, Lemmy, Misskey, configured RSS/Atom/JSON feeds, Mastodon-compatible Fediverse public timelines, and read-only Nostr relay windows.
+Bulk collectors `gdurl` and `dedigger` are implemented but disabled by default. Enable them with administrator environment flags only: `ENABLE_GDURL=true` or `ENABLE_DEDIGGER=true`. Bulk sources use deferred Google access validation, so newly discovered resources remain `UNKNOWN` until `gdpirate validate` checks them anonymously.
 
 The URL parser accepts known Google Drive, Docs, Sheets, Slides, Forms, and Drawings URL shapes, extracts a stable Google resource identity, and produces deterministic canonical URLs. Lookalike domains are rejected.
 
@@ -88,3 +93,4 @@ GDPIRATE_LIVE_DEAD_URL=
 Run `uv run gdpirate live-access-check` after setting one or more values.
 
 Fediverse instances live in `config/fediverse_instances.toml`. Feed seeds live in `config/feeds.toml`, including SpaceHey feed seeds plus disabled examples for Micro.blog and WriteFreely.
+deDigger query seeds live in `config/dedigger_queries.toml`. gdURL follows only the configured public Browse All catalogue URL and never guesses shortcodes.

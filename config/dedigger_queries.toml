@@ -1,0 +1,19 @@
+[[queries]]
+query = "*.pdf"
+enabled = true
+
+[[queries]]
+query = "*.zip"
+enabled = true
+
+[[queries]]
+query = "photo"
+enabled = true
+
+[[queries]]
+query = "music"
+enabled = true
+
+[[queries]]
+query = "2015"
+enabled = true

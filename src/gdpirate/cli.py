@@ -11,12 +11,16 @@ from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.database import session_scope
 from gdpirate.core.drive_urls import parse_google_url
 from gdpirate.core.models import AccessStatus
+from gdpirate.core.database import SessionLocal
+from gdpirate.core.models import CollectorState
 from gdpirate.pipeline.collection import CollectionRunner, source_statuses
 from gdpirate.pipeline.ingestion import (
     IngestionService,
     count_drive_links,
     count_drive_links_by_status,
 )
+from gdpirate.pipeline.validation import validate_links
+from sqlalchemy import delete, select
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -119,6 +123,64 @@ def collect(
                 f"unavailable={str(result.unavailable).lower()} "
                 f"error={result.error or ''}"
             )
+
+    asyncio.run(run())
+
+
+@app.command("validate")
+def validate(
+    max_items: int | None = typer.Option(None, "--max-items"),
+    concurrency: int | None = typer.Option(None, "--concurrency"),
+    source: str | None = typer.Option(None, "--source"),
+    status: str = typer.Option("UNKNOWN", "--status"),
+    stale_only: bool = typer.Option(False, "--stale-only"),
+) -> None:
+    async def run() -> None:
+        result = await validate_links(
+            max_items=max_items,
+            concurrency=concurrency,
+            source=source,
+            status=AccessStatus[status.upper()],
+            stale_only=stale_only,
+        )
+        typer.echo(f"selected={result.selected}")
+        typer.echo(f"checked={result.checked}")
+        typer.echo(f"public={result.public}")
+        typer.echo(f"restricted={result.restricted}")
+        typer.echo(f"dead={result.dead}")
+        typer.echo(f"unknown={result.unknown}")
+        typer.echo(f"errors={result.errors}")
+
+    asyncio.run(run())
+
+
+@app.command("collector-state")
+def collector_state(source: str) -> None:
+    async def run() -> None:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(CollectorState).where(CollectorState.collector_name == source)
+                )
+            ).scalars().all()
+            for row in rows:
+                typer.echo(f"{row.scope}: {row.cursor_json} error={row.last_error or ''}")
+
+    asyncio.run(run())
+
+
+@app.command("reset-collector")
+def reset_collector(source: str, yes: bool = typer.Option(False, "--yes")) -> None:
+    if not yes:
+        typer.confirm(f"Reset collector state for {source}?", abort=True)
+
+    async def run() -> None:
+        async with SessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    delete(CollectorState).where(CollectorState.collector_name == source)
+                )
+        typer.echo(f"reset {source}")
 
     asyncio.run(run())
 

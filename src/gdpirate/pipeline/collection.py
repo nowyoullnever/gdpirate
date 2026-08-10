@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from gdpirate.collectors.base import CandidateLink, Collector, CollectorContext
 from gdpirate.collectors.bluesky import BlueskyCollector
+from gdpirate.collectors.dedigger import DeDiggerCollector
 from gdpirate.collectors.feeds import FeedCollector
 from gdpirate.collectors.fediverse import FediverseCollector
+from gdpirate.collectors.gdurl import GdUrlCollector
 from gdpirate.collectors.hackernews import HackerNewsCollector
 from gdpirate.collectors.lemmy import LemmyCollector
 from gdpirate.collectors.misskey import MisskeyCollector
@@ -17,7 +19,7 @@ from gdpirate.config import Settings, get_settings
 from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.database import SessionLocal
 from gdpirate.core.http import HttpClientFactory
-from gdpirate.pipeline.ingestion import IngestionService
+from gdpirate.pipeline.ingestion import AccessCheckPolicy, IngestionService
 from gdpirate.pipeline.state import (
     load_collector_cursors,
     record_collector_attempt,
@@ -51,10 +53,13 @@ def build_collectors(settings: Settings | None = None) -> dict[str, Collector]:
         "feeds": FeedCollector(settings),
         "fediverse": FediverseCollector(settings),
         "nostr": NostrCollector(settings),
+        "gdurl": GdUrlCollector(settings),
+        "dedigger": DeDiggerCollector(settings),
     }
 
 
 def source_statuses(settings: Settings | None = None) -> dict[str, str]:
+    settings = settings or get_settings()
     return {
         "hackernews": "enabled",
         "bluesky": "enabled",
@@ -63,12 +68,10 @@ def source_statuses(settings: Settings | None = None) -> dict[str, str]:
         "feeds": "enabled",
         "fediverse": "enabled",
         "nostr": "enabled",
-        "gdurl": "enabled" if (settings or get_settings()).enable_gdurl else "disabled",
-        "dedigger": "enabled"
-        if (settings or get_settings()).enable_dedigger
-        else "disabled",
+        "gdurl": "enabled" if settings.enable_gdurl else "disabled",
+        "dedigger": "enabled" if settings.enable_dedigger else "disabled",
         "commoncrawl": "enabled"
-        if (settings or get_settings()).enable_common_crawl
+        if settings.enable_common_crawl
         else "disabled",
     }
 
@@ -94,6 +97,8 @@ class CollectionRunner:
         if source == "all":
             results = []
             for name in self.collectors:
+                if not self._collector_enabled(name):
+                    continue
                 results.append(
                     await self._collect_one(
                         name, max_items=max_items_per_source or max_items
@@ -102,7 +107,18 @@ class CollectionRunner:
             return results
         if source not in self.collectors:
             raise ValueError(f"unknown collector: {source}")
+        if not self._collector_enabled(source):
+            return [CollectionResult(source=source, error="collector disabled")]
         return [await self._collect_one(source, max_items=max_items)]
+
+    def _collector_enabled(self, source: str) -> bool:
+        if source == "gdurl":
+            return self.settings.enable_gdurl
+        if source == "dedigger":
+            return self.settings.enable_dedigger
+        if source == "commoncrawl":
+            return self.settings.enable_common_crawl
+        return True
 
     async def _collect_one(
         self, source: str, *, max_items: int | None = None
@@ -127,7 +143,7 @@ class CollectionRunner:
                 maxsize=self.settings.http_max_concurrency
             )
             workers = [
-                asyncio.create_task(self._ingest_worker(queue, client, result))
+                asyncio.create_task(self._ingest_worker(queue, client, result, source))
                 for _ in range(self.settings.http_max_concurrency)
             ]
             try:
@@ -158,6 +174,7 @@ class CollectionRunner:
         queue: asyncio.Queue[CandidateLink | None],
         client: httpx.AsyncClient,
         result: CollectionResult,
+        source: str,
     ) -> None:
         while True:
             candidate = await queue.get()
@@ -172,7 +189,12 @@ class CollectionRunner:
                         settings=self.settings,
                         check_access=False,
                     )
-                    ingestion = await service.ingest(candidate)
+                    policy = (
+                        AccessCheckPolicy.DEFERRED
+                        if source in {"gdurl", "dedigger"}
+                        else AccessCheckPolicy.IMMEDIATE
+                    )
+                    ingestion = await service.ingest_with_policy(candidate, policy)
             if ingestion.valid and ingestion.access_check_needed:
                 status = await AccessChecker(self.settings, client).check(
                     ingestion.canonical_url or candidate.raw_url

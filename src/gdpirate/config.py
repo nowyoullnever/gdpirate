@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     fediverse_local_only: bool = True
     nostr_relays: str = "wss://nos.lol,wss://relay.primal.net"
     nostr_viewer_base: str = "https://njump.me"
+    gdurl_browse_url: str = "https://gdurl.com/all"
+    gdurl_request_delay_seconds: float = 1.0
+    gdurl_max_concurrency: int = 1
+    gdurl_resolve_max_body_bytes: int = 262144
+    dedigger_base_url: str = "https://www.dedigger.com"
+    dedigger_query_config_path: str = "./config/dedigger_queries.toml"
+    dedigger_request_delay_seconds: float = 2.0
+    dedigger_max_concurrency: int = 1
     enable_gdurl: bool = False
     enable_dedigger: bool = False
     enable_common_crawl: bool = False
