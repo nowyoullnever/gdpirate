@@ -19,6 +19,7 @@ from gdpirate.core.resource_types import (
     should_upgrade_resource_type,
 )
 from gdpirate.core.source_quality import should_replace_source
+from gdpirate.core.source_urls import normalize_source_url
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class IngestionService:
         access_policy: AccessCheckPolicy,
     ) -> IngestionResult:
         existing = await self._find_existing(parsed)
+        source_url = normalize_source_url(candidate.source_url)
         created = existing is None
         link = existing or DriveLink(
             provider=parsed.provider,
@@ -85,7 +87,7 @@ class IngestionService:
             canonical_url=parsed.canonical_url,
             random_key=stable_random_key(parsed.provider, parsed.resource_id),
             source_name=candidate.source_name,
-            source_url=candidate.source_url,
+            source_url=source_url,
         )
 
         if existing is None:
@@ -165,10 +167,10 @@ class IngestionService:
             link.source_name,
             link.source_url,
             candidate.source_name,
-            candidate.source_url,
+            normalize_source_url(candidate.source_url),
         ):
             link.source_name = candidate.source_name
-            link.source_url = candidate.source_url
+            link.source_url = normalize_source_url(candidate.source_url)
         if should_upgrade_resource_type(link.resource_type, parsed.resource_type):
             link.resource_type = parsed.resource_type
             link.canonical_url = canonical_url(parsed.resource_type, parsed.resource_id)

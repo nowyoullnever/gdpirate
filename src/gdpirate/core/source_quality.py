@@ -1,17 +1,21 @@
+from gdpirate.core.source_urls import is_public_source_url
+
+
 QUALITY = {
     "Common Crawl URL Index": 10,
     "deDigger": 20,
-    "gdURL": 30,
+    "gdURL": 40,
     "Common Crawl": 80,
+    "Common Crawl WAT": 80,
 }
-DEFAULT_QUALITY = 70
+DEFAULT_QUALITY = 100
 
 
 def source_quality(source_name: str | None, source_url: str | None) -> int:
-    if not source_url:
+    if not is_public_source_url(source_url):
         return 0
     if not source_name:
-        return 1
+        return DEFAULT_QUALITY
     return QUALITY.get(source_name, DEFAULT_QUALITY)
 
 

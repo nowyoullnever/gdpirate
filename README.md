@@ -24,6 +24,13 @@ HTTP_TIMEOUT_SECONDS=20
 HTTP_MAX_CONCURRENCY=5
 ACCESS_CHECK_MAX_BODY_BYTES=524288
 ACCESS_RECHECK_HOURS=24
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_POOL_TIMEOUT_SECONDS=30
+DB_POOL_RECYCLE_SECONDS=1800
+WORKER_POLL_SECONDS=15
+LOG_LEVEL=INFO
+LOG_FORMAT=text
 ```
 
 Future source toggles such as `ENABLE_GDURL`, `ENABLE_DEDIGGER`, and `ENABLE_COMMON_CRAWL` are administrator configuration only and default to `false`.
@@ -63,6 +70,11 @@ uv run gdpirate collect commoncrawl --mode wat --max-files 1 --max-items 100
 uv run gdpirate collect commoncrawl --mode wat --max-files 1 --max-records 10000
 uv run gdpirate collect naver --max-items 10
 uv run gdpirate collect daum --max-items 10
+uv run gdpirate collect hackernews --max-items 200 --fresh-head
+uv run gdpirate worker
+uv run gdpirate worker --once
+uv run gdpirate jobs
+uv run gdpirate run-job recent
 uv run gdpirate collector-state gdurl
 uv run gdpirate live-access-check
 uv run gdpirate serve
@@ -76,7 +88,57 @@ Initialize the database, collect links, validate them, then run:
 uv run gdpirate serve
 ```
 
-The local app listens on `http://127.0.0.1:8000` by default. `GET /healthz` returns `{"status":"ok"}`. `GET /api/random` returns one verified public Drive URL and its source with `Cache-Control: no-store`, or `503 {"error":"no_verified_public_link_available"}` when no eligible row exists.
+The local app listens on `http://127.0.0.1:8000` by default. `GET /healthz` is process liveness. `GET /readyz` performs a lightweight database/schema readiness check. `GET /api/random` returns one verified public Drive URL and its source with `Cache-Control: no-store`, or `503 {"error":"no_verified_public_link_available"}` when no eligible row exists or the database is unavailable.
+
+## Local SQLite
+
+SQLite remains supported for local development and tests:
+
+```bash
+uv run gdpirate init-db
+uv run gdpirate collect hackernews --max-items 20
+uv run gdpirate validate --max-items 100
+uv run gdpirate serve
+```
+
+SQLite worker locking is a same-process fallback only. Use PostgreSQL for persistent deployment or multiple worker processes.
+
+## Fresh-Head And Backfill
+
+Persistent collection loads and updates `collector_state`, so it is used for historical cursor/backfill progress. Fresh-head collection starts from an empty ephemeral cursor and does not write checkpoints:
+
+```bash
+uv run gdpirate collect hackernews --max-items 200 --fresh-head
+```
+
+Fresh-head accepts repeated work; database deduplication keeps it cheap while ensuring newest upstream posts continue to be checked.
+
+## Worker
+
+Scheduled jobs live in `config/jobs.toml`:
+
+```bash
+uv run gdpirate worker
+uv run gdpirate worker --once
+uv run gdpirate jobs
+uv run gdpirate run-job recent
+```
+
+The worker runs recent fresh-head collection, persistent feed polling, historical backfill, UNKNOWN validation, and stale PUBLIC revalidation. One job failure is recorded with bounded backoff and does not stop other due jobs. Heavy collectors (`gdurl`, `dedigger`, `commoncrawl`) and credentialed Korean APIs (`naver`, `daum`) are not scheduled by default.
+
+The FastAPI process does not run collectors, validation, or scheduling.
+
+## Docker Compose
+
+For a production-like PostgreSQL stack:
+
+```bash
+copy .env.docker.example .env.docker
+# edit POSTGRES_PASSWORD and DATABASE_URL
+docker compose up --build
+```
+
+Compose starts PostgreSQL, runs `gdpirate init-db` in a migration service, then starts separate web and worker services. PostgreSQL data is stored in a named volume. The public app is available at `http://127.0.0.1:8000` by default.
 
 ## Tests
 
@@ -97,7 +159,7 @@ NAVER and Daum collectors are optional official API collectors. NAVER uses NAVER
 
 The URL parser accepts known Google Drive, Docs, Sheets, Slides, Forms, and Drawings URL shapes, extracts a stable Google resource identity, and produces deterministic canonical URLs. Lookalike domains are rejected.
 
-Deduplication is based on the actual Google resource identity through a unique `(provider, resource_id)` constraint. GDPirate stores one source name and source URL per resource; it does not keep discovery history or occurrence counts. If a later URL reveals a more specific Google resource type, the stored type and canonical URL are upgraded.
+Deduplication is based on the actual Google resource identity through a unique `(provider, resource_id)` constraint. GDPirate stores one source name and source URL per resource; it does not keep discovery history or occurrence counts. Source URLs are normalized to public HTTP/HTTPS links at ingestion; invalid schemes such as `javascript:`, `data:`, and `file:` are discarded. If a later URL reveals a more specific Google resource type, the stored type and canonical URL are upgraded.
 Random web selection uses a deterministic indexed `random_key` and wraps around the keyspace instead of using `ORDER BY RANDOM()`. Only `PUBLIC` rows with a stored source URL are eligible, and stale links are anonymously rechecked before they are returned.
 
 Anonymous access checking uses `httpx.AsyncClient` without Google cookies, OAuth, browser state, or stored credentials. Uncertain results fail closed to `UNKNOWN`, not `PUBLIC`.

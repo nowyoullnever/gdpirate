@@ -11,6 +11,16 @@ class Settings(BaseSettings):
     http_max_redirects: int = 10
     access_check_max_body_bytes: int = 524288
     access_recheck_hours: int = 24
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout_seconds: int = 30
+    db_pool_recycle_seconds: int = 1800
+    worker_poll_seconds: float = 15
+    worker_failure_base_backoff_seconds: int = 60
+    worker_failure_max_backoff_seconds: int = 1800
+    jobs_config_path: str = "./config/jobs.toml"
+    log_level: str = "INFO"
+    log_format: str = "text"
     bluesky_api_base: str = "https://api.bsky.app"
     lemmy_instances: str = "https://lemmy.world,https://lemmy.ml"
     misskey_instances: str = "https://misskey.io"
@@ -66,6 +76,8 @@ class Settings(BaseSettings):
             return self.database_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
         if self.database_url.startswith("postgresql://"):
             return self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if self.database_url.startswith("postgresql+psycopg://"):
+            return self.database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
         return self.database_url
 
     @property
@@ -73,7 +85,11 @@ class Settings(BaseSettings):
         if self.database_url.startswith("sqlite+aiosqlite:///"):
             return self.database_url.replace("sqlite+aiosqlite:///", "sqlite:///", 1)
         if self.database_url.startswith("postgresql+asyncpg://"):
-            return self.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+            return self.database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+        if self.database_url.startswith("postgresql+psycopg://"):
+            return self.database_url
+        if self.database_url.startswith("postgresql://"):
+            return self.database_url.replace("postgresql://", "postgresql+psycopg://", 1)
         return self.database_url
 
     @property

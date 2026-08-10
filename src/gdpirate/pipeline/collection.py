@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 
 import httpx
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -28,6 +29,21 @@ from gdpirate.pipeline.state import (
     record_collector_error,
     record_collector_success,
 )
+
+
+class CollectionStateMode(str, Enum):
+    PERSISTENT = "persistent"
+    FRESH_HEAD = "fresh-head"
+
+
+FRESH_HEAD_SOURCES = {
+    "hackernews",
+    "bluesky",
+    "lemmy",
+    "misskey",
+    "fediverse",
+    "nostr",
+}
 
 
 @dataclass
@@ -108,7 +124,14 @@ class CollectionRunner:
         commoncrawl_mode: str | None = None,
         max_files: int | None = None,
         max_records: int | None = None,
+        state_mode: str | CollectionStateMode = CollectionStateMode.PERSISTENT,
     ) -> list[CollectionResult]:
+        state_mode = CollectionStateMode(state_mode)
+        if (
+            state_mode == CollectionStateMode.FRESH_HEAD
+            and source not in FRESH_HEAD_SOURCES | {"all"}
+        ):
+            raise ValueError(f"fresh-head is not supported for collector: {source}")
         if source == "commoncrawl" and (
             commoncrawl_mode or max_files is not None or max_records is not None
         ):
@@ -125,11 +148,15 @@ class CollectionRunner:
         if source == "all":
             results = []
             for name in self.collectors:
+                if state_mode == CollectionStateMode.FRESH_HEAD and name not in FRESH_HEAD_SOURCES:
+                    continue
                 if not self._collector_enabled(name):
                     continue
                 results.append(
                     await self._collect_one(
-                        name, max_items=max_items_per_source or max_items
+                        name,
+                        max_items=max_items_per_source or max_items,
+                        state_mode=state_mode,
                     )
                 )
             return results
@@ -138,7 +165,7 @@ class CollectionRunner:
         if not self._collector_enabled(source):
             status = source_statuses(self.settings).get(source, "disabled")
             return [CollectionResult(source=source, error=f"collector {status}")]
-        return [await self._collect_one(source, max_items=max_items)]
+        return [await self._collect_one(source, max_items=max_items, state_mode=state_mode)]
 
     def _collector_enabled(self, source: str) -> bool:
         if source == "gdurl":
@@ -157,17 +184,26 @@ class CollectionRunner:
         return True
 
     async def _collect_one(
-        self, source: str, *, max_items: int | None = None
+        self,
+        source: str,
+        *,
+        max_items: int | None = None,
+        state_mode: CollectionStateMode = CollectionStateMode.PERSISTENT,
     ) -> CollectionResult:
         result = CollectionResult(source=source)
-        async with self.session_factory() as session:
-            async with session.begin():
-                await record_collector_attempt(session, source)
-                cursor = await load_collector_cursors(session, source)
+        if state_mode == CollectionStateMode.PERSISTENT:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    await record_collector_attempt(session, source)
+                    cursor = await load_collector_cursors(session, source)
+        else:
+            cursor = {}
 
         factory = HttpClientFactory(self.settings)
         async with factory.client() as client:
             async def checkpoint(scope: str, value: dict) -> None:
+                if state_mode == CollectionStateMode.FRESH_HEAD:
+                    return
                 async with self.session_factory() as session:
                     async with session.begin():
                         await record_collector_success(session, source, scope, value)
@@ -197,12 +233,13 @@ class CollectionRunner:
         result.unavailable = context.unavailable
         result.scanned = context.scanned
         result.error = result.error or context.error
-        async with self.session_factory() as session:
-            async with session.begin():
-                if result.error:
-                    await record_collector_error(session, source, "default", result.error)
-                else:
-                    await record_collector_success(session, source, "default", {})
+        if state_mode == CollectionStateMode.PERSISTENT:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    if result.error:
+                        await record_collector_error(session, source, "default", result.error)
+                    else:
+                        await record_collector_success(session, source, "default", {})
         return result
 
     async def _ingest_worker(

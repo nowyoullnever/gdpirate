@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy import text
 
+from gdpirate.core.database import SessionLocal
 from gdpirate.pipeline.random_selection import RandomLinkService
 
 app = FastAPI(title="GDPIRATE")
+logger = logging.getLogger(__name__)
 
 
 @app.get("/healthz")
@@ -13,10 +18,29 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/readyz")
+async def readyz():
+    try:
+        async with SessionLocal() as session:
+            await session.execute(text("SELECT id FROM drive_links LIMIT 1"))
+        return {"status": "ready"}
+    except Exception:
+        logger.exception("readiness check failed")
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+
+
 @app.get("/api/random")
 async def api_random(response: Response):
     response.headers["Cache-Control"] = "no-store"
-    link = await RandomLinkService().pick()
+    try:
+        link = await RandomLinkService().pick()
+    except Exception:
+        logger.exception("random link selection failed")
+        return JSONResponse(
+            {"error": "no_verified_public_link_available"},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
     if link is None:
         return JSONResponse(
             {"error": "no_verified_public_link_available"},
@@ -74,16 +98,16 @@ async def index() -> str:
           result.textContent = payload.error || "unavailable";
           return;
         }
-        result.innerHTML = "";
+        result.replaceChildren();
         const drive = document.createElement("a");
         drive.href = payload.url;
         drive.target = "_blank";
-        drive.rel = "noreferrer";
+        drive.rel = "noopener noreferrer";
         drive.textContent = payload.url;
         const source = document.createElement("a");
         source.href = payload.source.url;
         source.target = "_blank";
-        source.rel = "noreferrer";
+        source.rel = "noopener noreferrer";
         source.textContent = payload.source.name;
         result.append("Drive: ", drive, document.createElement("br"), "Source: ", source);
       } finally {

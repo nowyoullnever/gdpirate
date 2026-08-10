@@ -1,0 +1,60 @@
+services:
+  db:
+    image: postgres:18
+    env_file:
+      - .env.docker
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    env_file:
+      - .env.docker
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["gdpirate", "init-db"]
+    restart: "no"
+
+  web:
+    build: .
+    env_file:
+      - .env.docker
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${GDPIRATE_WEB_PORT:-8000}:8000"
+    command: ["gdpirate", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    build: .
+    env_file:
+      - .env.docker
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["gdpirate", "worker"]
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config:ro
+      - commoncrawl-data:/app/commoncrawl-data
+
+volumes:
+  postgres-data:
+  commoncrawl-data:

@@ -274,6 +274,7 @@ async def test_commoncrawl_wat_candidates_source_and_no_live_source_requests(tmp
 
     assert len(items) == 1
     assert items[0].raw_url == "https://drive.google.com/file/d/ABC123/view"
+    assert items[0].source_name == "Common Crawl WAT"
     assert items[0].source_url == "https://source.example/post"
     assert not any("source.example" in url for url in requested)
     assert not list((tmp_path / "tmp").glob("*.wat.gz"))

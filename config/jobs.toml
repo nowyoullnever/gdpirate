@@ -1,0 +1,64 @@
+[[jobs]]
+name = "recent"
+kind = "collect"
+enabled = true
+interval_seconds = 900
+sources = ["hackernews", "bluesky", "lemmy", "misskey", "fediverse", "nostr"]
+state_mode = "fresh-head"
+max_items_per_source = 200
+
+[[jobs]]
+name = "feeds"
+kind = "collect"
+enabled = true
+interval_seconds = 900
+sources = ["feeds"]
+state_mode = "persistent"
+max_items_per_source = 500
+
+[[jobs]]
+name = "backfill"
+kind = "collect"
+enabled = true
+interval_seconds = 3600
+sources = ["hackernews", "bluesky", "lemmy", "misskey", "fediverse", "nostr"]
+state_mode = "persistent"
+max_items_per_source = 500
+
+[[jobs]]
+name = "validate_unknown"
+kind = "validate"
+enabled = true
+interval_seconds = 300
+status = "UNKNOWN"
+stale_only = false
+max_items = 500
+concurrency = 3
+
+[[jobs]]
+name = "refresh_public"
+kind = "validate"
+enabled = true
+interval_seconds = 1800
+status = "PUBLIC"
+stale_only = true
+max_items = 200
+concurrency = 3
+
+[[jobs]]
+name = "bulk_gdurl_example"
+kind = "collect"
+enabled = false
+interval_seconds = 86400
+sources = ["gdurl"]
+state_mode = "persistent"
+max_items_per_source = 1000
+
+[[jobs]]
+name = "bulk_commoncrawl_example"
+kind = "collect"
+enabled = false
+interval_seconds = 86400
+sources = ["commoncrawl"]
+state_mode = "persistent"
+max_items_per_source = 1000

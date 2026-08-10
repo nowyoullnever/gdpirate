@@ -11,6 +11,7 @@ from gdpirate.collectors.base import CandidateLink
 from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.database import session_scope
 from gdpirate.core.drive_urls import parse_google_url
+from gdpirate.core.logging import configure_logging
 from gdpirate.core.models import AccessStatus
 from gdpirate.core.database import SessionLocal
 from gdpirate.core.models import CollectorState
@@ -24,6 +25,7 @@ from gdpirate.pipeline.validation import validate_links
 from gdpirate.collectors.commoncrawl import fetch_collinfo
 from gdpirate.config import get_settings
 from gdpirate.core.http import HttpClientFactory
+from gdpirate.worker import Worker, list_job_rows
 from sqlalchemy import delete, select
 
 app = typer.Typer(no_args_is_help=True)
@@ -113,6 +115,7 @@ def collect(
     mode: str | None = typer.Option(None, "--mode"),
     max_files: int | None = typer.Option(None, "--max-files"),
     max_records: int | None = typer.Option(None, "--max-records"),
+    fresh_head: bool = typer.Option(False, "--fresh-head"),
 ) -> None:
     async def run() -> None:
         runner = CollectionRunner()
@@ -123,6 +126,7 @@ def collect(
             commoncrawl_mode=mode,
             max_files=max_files,
             max_records=max_records,
+            state_mode="fresh-head" if fresh_head else "persistent",
         )
         for result in results:
             typer.echo(
@@ -158,6 +162,60 @@ def serve(
 ) -> None:
     """Serve the minimal random-link web app."""
     uvicorn.run("gdpirate.web:app", host=host, port=port)
+
+
+@app.command("worker")
+def worker(once: bool = typer.Option(False, "--once")) -> None:
+    """Run scheduled collection and validation jobs."""
+    settings = get_settings()
+    configure_logging(settings)
+
+    async def run() -> None:
+        await Worker(settings=settings).run(once=once)
+
+    asyncio.run(run())
+
+
+@app.command("run-job")
+def run_job(job_name: str) -> None:
+    """Run one configured job now."""
+    settings = get_settings()
+    configure_logging(settings)
+
+    async def run() -> None:
+        outcome = await Worker(settings=settings).run_named_job(job_name)
+        if not outcome.ran:
+            typer.echo(f"{job_name}: skipped {outcome.skipped_reason}")
+            return
+        if outcome.error:
+            typer.echo(f"{job_name}: failed {outcome.error}")
+            raise typer.Exit(1)
+        typer.echo(f"{job_name}: completed {outcome.result}")
+
+    asyncio.run(run())
+
+
+@app.command("jobs")
+def jobs() -> None:
+    """Show configured scheduled jobs and latest state."""
+
+    async def run() -> None:
+        for job, state in await list_job_rows():
+            typer.echo(
+                "\t".join(
+                    [
+                        job.name,
+                        f"enabled={str(job.enabled).lower()}",
+                        f"kind={job.kind}",
+                        f"next={state.next_run_at if state else ''}",
+                        f"last_success={state.last_success_at if state else ''}",
+                        f"failures={state.consecutive_failures if state else 0}",
+                        f"error={(state.last_error or '') if state else ''}",
+                    ]
+                )
+            )
+
+    asyncio.run(run())
 
 
 @app.command("validate")

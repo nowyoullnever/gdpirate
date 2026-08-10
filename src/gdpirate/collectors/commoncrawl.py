@@ -360,7 +360,7 @@ async def iter_wat_events(
                         "record_index": record_index,
                         "candidate": CandidateLink(
                             raw_url=google_url,
-                            source_name="Common Crawl",
+                            source_name="Common Crawl WAT",
                             source_url=target,
                         ),
                     }

@@ -11,6 +11,7 @@ from gdpirate.config import Settings, get_settings
 from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.database import SessionLocal
 from gdpirate.core.models import AccessStatus, DriveLink, utc_now
+from gdpirate.core.source_urls import normalize_source_url
 
 
 @dataclass(frozen=True)
@@ -41,13 +42,18 @@ class RandomLinkService:
             if row is None:
                 return None
             excluded_ids.add(row.id)
+            source_url = normalize_source_url(row.source_url)
+            if source_url is None:
+                continue
             if not _is_stale(row.last_checked_at, stale_before):
-                return _random_link(row)
+                return _random_link(row, source_url)
 
             status = await self.access_checker.check(row.canonical_url)
             fresh_row = await self._update_status(row.id, status)
             if fresh_row is not None and fresh_row.access_status == AccessStatus.PUBLIC:
-                return _random_link(fresh_row)
+                fresh_source_url = normalize_source_url(fresh_row.source_url)
+                if fresh_source_url is not None:
+                    return _random_link(fresh_row, fresh_source_url)
         return None
 
     async def _select_candidate(
@@ -99,9 +105,9 @@ def _is_stale(checked_at: datetime | None, stale_before: datetime) -> bool:
     return checked_at < stale_before
 
 
-def _random_link(row: DriveLink) -> RandomLink:
+def _random_link(row: DriveLink, source_url: str) -> RandomLink:
     return RandomLink(
         url=row.canonical_url,
         source_name=row.source_name,
-        source_url=str(row.source_url),
+        source_url=source_url,
     )
