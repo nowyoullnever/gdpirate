@@ -71,6 +71,32 @@ async def test_fediverse_detection_auth_required_and_unknown_compatible():
     assert detection.status == "authentication_required"
 
 
+async def test_detects_akkoma_and_pixelfed_from_nodeinfo():
+    async def run_detection(software: str):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/.well-known/nodeinfo":
+                return httpx.Response(
+                    200,
+                    json={"links": [{"href": f"https://{software}.example/nodeinfo"}]},
+                )
+            if request.url.path == "/nodeinfo":
+                return httpx.Response(200, json={"software": {"name": software}})
+            if request.url.path == "/api/v1/timelines/public":
+                return httpx.Response(200, json=[])
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await detect_fediverse_instance(client, f"https://{software}.example")
+
+    akkoma = await run_detection("akkoma")
+    pixelfed = await run_detection("pixelfed")
+
+    assert akkoma.software == "akkoma"
+    assert akkoma.compatible is True
+    assert pixelfed.software == "pixelfed"
+    assert pixelfed.public_timeline_available is True
+
+
 async def test_fediverse_one_instance_fails_another_works(tmp_path):
     config = tmp_path / "fediverse.toml"
     config.write_text(
