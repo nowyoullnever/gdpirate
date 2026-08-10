@@ -1,13 +1,21 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import logging
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gdpirate.collectors.base import CandidateLink
 from gdpirate.core.access_check import AccessChecker
-from gdpirate.core.drive_urls import ParsedGoogleUrl, parse_google_url
+from gdpirate.config import Settings, get_settings
+from gdpirate.core.drive_urls import ParsedGoogleUrl, canonical_url, parse_google_url
 from gdpirate.core.models import AccessStatus, DriveLink
+from gdpirate.core.resource_types import (
+    is_contradictory_type,
+    should_upgrade_resource_type,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -26,10 +34,12 @@ class IngestionService:
         self,
         session: AsyncSession,
         access_checker: AccessChecker | None = None,
+        settings: Settings | None = None,
         *,
         check_access: bool = True,
     ) -> None:
         self.session = session
+        self.settings = settings or get_settings()
         self.access_checker = access_checker or AccessChecker()
         self.check_access = check_access
 
@@ -51,12 +61,26 @@ class IngestionService:
 
         if existing is None:
             self.session.add(link)
-        elif not existing.source_url and candidate.source_url:
-            existing.source_name = candidate.source_name
-            existing.source_url = candidate.source_url
+        else:
+            if not existing.source_url and candidate.source_url:
+                existing.source_name = candidate.source_name
+                existing.source_url = candidate.source_url
+            if should_upgrade_resource_type(existing.resource_type, parsed.resource_type):
+                existing.resource_type = parsed.resource_type
+                existing.canonical_url = canonical_url(
+                    parsed.resource_type, parsed.resource_id
+                )
+            elif is_contradictory_type(existing.resource_type, parsed.resource_type):
+                logger.warning(
+                    "conflicting resource types for %s/%s: existing=%s discovered=%s",
+                    parsed.provider,
+                    parsed.resource_id,
+                    existing.resource_type.value,
+                    parsed.resource_type.value,
+                )
 
-        if self.check_access:
-            link.access_status = await self.access_checker.check(parsed.canonical_url)
+        if self.check_access and self._should_check_access(link, created):
+            link.access_status = await self.access_checker.check(link.canonical_url)
             link.last_checked_at = datetime.now(UTC)
 
         await self.session.flush()
@@ -69,12 +93,21 @@ class IngestionService:
             resource_id=link.resource_id,
         )
 
+    def _should_check_access(self, link: DriveLink, created: bool) -> bool:
+        if created or link.last_checked_at is None:
+            return True
+        checked_at = link.last_checked_at
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=UTC)
+        return datetime.now(UTC) - checked_at >= timedelta(
+            hours=self.settings.access_recheck_hours
+        )
+
     async def _find_existing(self, parsed: ParsedGoogleUrl) -> DriveLink | None:
         result = await self.session.execute(
             select(DriveLink).where(
                 DriveLink.provider == parsed.provider,
                 DriveLink.resource_id == parsed.resource_id,
-                DriveLink.resource_type == parsed.resource_type,
             )
         )
         return result.scalar_one_or_none()
@@ -83,3 +116,15 @@ class IngestionService:
 async def count_drive_links(session: AsyncSession) -> int:
     result = await session.execute(select(func.count(DriveLink.id)))
     return int(result.scalar_one())
+
+
+async def count_drive_links_by_status(session: AsyncSession) -> dict[AccessStatus, int]:
+    result = await session.execute(
+        select(DriveLink.access_status, func.count(DriveLink.id)).group_by(
+            DriveLink.access_status
+        )
+    )
+    counts = {status: 0 for status in AccessStatus}
+    for status, count in result.all():
+        counts[status] = int(count)
+    return counts

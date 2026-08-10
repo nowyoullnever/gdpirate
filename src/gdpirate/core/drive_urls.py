@@ -13,6 +13,7 @@ GOOGLE_HOSTS = {
     "drive.usercontent.google.com",
     "docs.googleusercontent.com",
 }
+DISCOVERY_TERMS = ("drive.google.com", "docs.google.com")
 DOC_KIND_TO_TYPE = {
     "document": ResourceType.DOCUMENT,
     "spreadsheets": ResourceType.SPREADSHEET,
@@ -115,7 +116,7 @@ def _parse_drive_url(
         return ResourceType.FOLDER, path_parts[4]
 
     if path_parts and path_parts[0] in {"open", "uc"}:
-        return ResourceType.FILE, _single_query_value(query, "id")
+        return ResourceType.UNKNOWN, _single_query_value(query, "id")
 
     if path_parts and path_parts[0] == "folderview":
         return ResourceType.FOLDER, _single_query_value(query, "id")

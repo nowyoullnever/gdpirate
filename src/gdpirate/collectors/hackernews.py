@@ -1,0 +1,60 @@
+from collections.abc import AsyncIterator
+
+import httpx
+
+from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.core.drive_urls import DISCOVERY_TERMS, extract_google_urls
+from gdpirate.core.http import request_with_retries
+
+
+class HackerNewsCollector:
+    name = "hackernews"
+    source_name = "Hacker News"
+    base_url = "https://hn.algolia.com/api/v1/search_by_date"
+
+    async def collect(
+        self, context: CollectorContext, *, max_items: int | None = None
+    ) -> AsyncIterator[CandidateLink]:
+        emitted = 0
+        for term in DISCOVERY_TERMS:
+            for tag in ("story", "comment"):
+                scope = f"{tag}/{term}"
+                page = int(context.get_cursor(scope).get("page", 0))
+                while max_items is None or emitted < max_items:
+                    response = await request_with_retries(
+                        context.client,
+                        "GET",
+                        self.base_url,
+                        params={"query": term, "tags": tag, "page": page},
+                    )
+                    if response.status_code == 429:
+                        context.error = "rate limited"
+                        return
+                    response.raise_for_status()
+                    payload = response.json()
+                    hits = payload.get("hits") or []
+                    if not hits:
+                        break
+                    for hit in hits:
+                        source_url = _hn_source_url(hit)
+                        text = " ".join(
+                            str(hit.get(key) or "")
+                            for key in ("url", "title", "story_text", "comment_text")
+                        )
+                        for raw_url in extract_google_urls(text):
+                            yield CandidateLink(
+                                raw_url=raw_url,
+                                source_name=self.source_name,
+                                source_url=source_url,
+                            )
+                            emitted += 1
+                            if max_items is not None and emitted >= max_items:
+                                context.set_cursor(scope, {"page": page})
+                                return
+                    page += 1
+                    context.set_cursor(scope, {"page": page})
+
+
+def _hn_source_url(hit: dict) -> str | None:
+    object_id = hit.get("objectID")
+    return f"https://news.ycombinator.com/item?id={object_id}" if object_id else None

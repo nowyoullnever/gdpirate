@@ -1,8 +1,10 @@
 import pytest
+from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from gdpirate.collectors.base import CandidateLink
+from gdpirate.config import Settings
 from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.models import AccessStatus, Base, DriveLink
 from gdpirate.pipeline.ingestion import IngestionService, count_drive_links
@@ -11,8 +13,10 @@ from gdpirate.pipeline.ingestion import IngestionService, count_drive_links
 class StaticAccessChecker(AccessChecker):
     def __init__(self, status: AccessStatus = AccessStatus.PUBLIC) -> None:
         self.status = status
+        self.calls = 0
 
     async def check(self, raw_url: str) -> AccessStatus:
+        self.calls += 1
         return self.status
 
 
@@ -74,6 +78,30 @@ async def test_duplicate_representations_do_not_create_history_or_rows(session):
     assert link.source_url == "https://example.com/first"
 
 
+async def test_same_id_with_different_resource_types_deduplicates_and_upgrades(session):
+    checker = StaticAccessChecker()
+    service = IngestionService(session, checker, check_access=False)
+
+    await service.ingest(
+        CandidateLink(
+            raw_url="https://drive.google.com/open?id=ABC123",
+            source_name="manual",
+        )
+    )
+    result = await service.ingest(
+        CandidateLink(
+            raw_url="https://docs.google.com/document/d/ABC123/edit",
+            source_name="manual",
+        )
+    )
+
+    assert result.duplicate is True
+    assert await count_drive_links(session) == 1
+    link = (await session.execute(select(DriveLink))).scalar_one()
+    assert link.resource_type.value == "DOCUMENT"
+    assert link.canonical_url == "https://docs.google.com/document/d/ABC123/edit"
+
+
 async def test_duplicate_can_fill_missing_source_url(session):
     service = IngestionService(session, StaticAccessChecker())
 
@@ -95,6 +123,57 @@ async def test_duplicate_can_fill_missing_source_url(session):
     link = (await session.execute(select(DriveLink))).scalar_one()
     assert link.source_name == "second"
     assert link.source_url == "https://example.com/second"
+
+
+async def test_recent_duplicate_skips_access_recheck(session):
+    checker = StaticAccessChecker(AccessStatus.PUBLIC)
+    service = IngestionService(
+        session, checker, settings=Settings(access_recheck_hours=24)
+    )
+
+    await service.ingest(
+        CandidateLink(
+            raw_url="https://drive.google.com/file/d/ABC123/view",
+            source_name="manual",
+        )
+    )
+    checker.status = AccessStatus.RESTRICTED
+    result = await service.ingest(
+        CandidateLink(
+            raw_url="https://drive.google.com/file/d/ABC123/edit",
+            source_name="manual",
+        )
+    )
+
+    assert checker.calls == 1
+    assert result.access_status == AccessStatus.PUBLIC
+
+
+async def test_stale_duplicate_triggers_access_recheck(session):
+    checker = StaticAccessChecker(AccessStatus.PUBLIC)
+    service = IngestionService(
+        session, checker, settings=Settings(access_recheck_hours=24)
+    )
+
+    await service.ingest(
+        CandidateLink(
+            raw_url="https://drive.google.com/file/d/ABC123/view",
+            source_name="manual",
+        )
+    )
+    link = (await session.execute(select(DriveLink))).scalar_one()
+    link.last_checked_at = datetime.now(UTC) - timedelta(hours=25)
+    checker.status = AccessStatus.RESTRICTED
+
+    result = await service.ingest(
+        CandidateLink(
+            raw_url="https://drive.google.com/file/d/ABC123/edit",
+            source_name="manual",
+        )
+    )
+
+    assert checker.calls == 2
+    assert result.access_status == AccessStatus.RESTRICTED
 
 
 async def test_invalid_candidate_is_not_stored(session):

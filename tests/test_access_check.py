@@ -7,6 +7,16 @@ from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.models import AccessStatus
 
 
+class CountingStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.chunks_read = 0
+
+    async def __aiter__(self):
+        for _ in range(100):
+            self.chunks_read += 1
+            yield b"x" * 64
+
+
 def settings() -> Settings:
     return Settings(access_check_max_body_bytes=256, http_timeout_seconds=1)
 
@@ -81,3 +91,25 @@ async def test_timeout_fails_closed_to_unknown():
     respx.get(url).mock(side_effect=httpx.TimeoutException("slow"))
 
     assert await AccessChecker(settings()).check(url) == AccessStatus.UNKNOWN
+
+
+async def test_streaming_access_check_reads_only_configured_limit():
+    stream = CountingStream()
+    url = "https://drive.google.com/file/d/ABC123/view"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            stream=stream,
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+        status = await AccessChecker(
+            Settings(access_check_max_body_bytes=128), client
+        ).check(url)
+
+    assert status == AccessStatus.UNKNOWN
+    assert stream.chunks_read == 2

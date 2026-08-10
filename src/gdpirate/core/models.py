@@ -1,7 +1,7 @@
 import enum
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Enum, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -37,7 +37,6 @@ class DriveLink(Base):
         UniqueConstraint(
             "provider",
             "resource_id",
-            "resource_type",
             name="uq_drive_links_identity",
         ),
     )
@@ -62,6 +61,28 @@ class DriveLink(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class CollectorState(Base):
+    __tablename__ = "collector_state"
+    __table_args__ = (
+        UniqueConstraint("collector_name", "scope", name="uq_collector_state_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    collector_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    scope: Mapped[str] = mapped_column(String(256), nullable=False)
+    cursor_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )

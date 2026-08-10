@@ -9,7 +9,13 @@ from gdpirate.collectors.base import CandidateLink
 from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.database import session_scope
 from gdpirate.core.drive_urls import parse_google_url
-from gdpirate.pipeline.ingestion import IngestionService, count_drive_links
+from gdpirate.core.models import AccessStatus
+from gdpirate.pipeline.collection import CollectionRunner, source_statuses
+from gdpirate.pipeline.ingestion import (
+    IngestionService,
+    count_drive_links,
+    count_drive_links_by_status,
+)
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -72,7 +78,46 @@ def stats() -> None:
     async def run() -> None:
         async with session_scope() as session:
             total = await count_drive_links(session)
-            typer.echo(f"drive_links: {total}")
+            counts = await count_drive_links_by_status(session)
+            typer.echo("Drive links")
+            typer.echo("-----------")
+            typer.echo(f"Total: {total}")
+            typer.echo(f"Public: {counts[AccessStatus.PUBLIC]}")
+            typer.echo(f"Restricted: {counts[AccessStatus.RESTRICTED]}")
+            typer.echo(f"Dead: {counts[AccessStatus.DEAD]}")
+            typer.echo(f"Unknown: {counts[AccessStatus.UNKNOWN]}")
+
+    asyncio.run(run())
+
+
+@app.command("sources")
+def sources() -> None:
+    for name, status in source_statuses().items():
+        typer.echo(f"{name}\t{status}")
+
+
+@app.command("collect")
+def collect(
+    source: str,
+    max_items: int | None = typer.Option(None, "--max-items"),
+    max_items_per_source: int | None = typer.Option(None, "--max-items-per-source"),
+) -> None:
+    async def run() -> None:
+        runner = CollectionRunner()
+        results = await runner.collect(
+            source,
+            max_items=max_items,
+            max_items_per_source=max_items_per_source,
+        )
+        for result in results:
+            typer.echo(
+                f"{result.source}: scanned={result.scanned} candidates={result.candidates} "
+                f"created={result.created} duplicates={result.duplicates} "
+                f"public={result.public} restricted={result.restricted} "
+                f"dead={result.dead} unknown={result.unknown} "
+                f"unavailable={str(result.unavailable).lower()} "
+                f"error={result.error or ''}"
+            )
 
     asyncio.run(run())
 

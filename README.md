@@ -49,6 +49,9 @@ uv run gdpirate parse-url "https://drive.google.com/file/d/ABC123/view"
 uv run gdpirate check-url "https://drive.google.com/file/d/ABC123/view"
 uv run gdpirate ingest-url "https://drive.google.com/file/d/ABC123/view" --source-name manual --source-url "https://example.com/post"
 uv run gdpirate stats
+uv run gdpirate sources
+uv run gdpirate collect hackernews --max-items 10
+uv run gdpirate collect all --max-items-per-source 10
 ```
 
 ## Tests
@@ -62,9 +65,11 @@ The normal test suite uses mocked HTTP responses for access checks. Optional liv
 ## Architecture
 
 Future collectors emit `CandidateLink` objects and call the central ingestion service. Collectors do not parse Google URLs and do not talk to SQLAlchemy directly.
+The first collector set discovers links from Hacker News, anonymous Bluesky search when available, Lemmy, Misskey, and configured RSS/Atom feeds.
 
 The URL parser accepts known Google Drive, Docs, Sheets, Slides, Forms, and Drawings URL shapes, extracts a stable Google resource identity, and produces deterministic canonical URLs. Lookalike domains are rejected.
 
-Deduplication is based on the actual Google resource identity through a unique `(provider, resource_id, resource_type)` constraint. GDPirate stores one source name and source URL per resource; it does not keep discovery history or occurrence counts.
+Deduplication is based on the actual Google resource identity through a unique `(provider, resource_id)` constraint. GDPirate stores one source name and source URL per resource; it does not keep discovery history or occurrence counts. If a later URL reveals a more specific Google resource type, the stored type and canonical URL are upgraded.
 
 Anonymous access checking uses `httpx.AsyncClient` without Google cookies, OAuth, browser state, or stored credentials. Uncertain results fail closed to `UNKNOWN`, not `PUBLIC`.
+Access checks use bounded streaming and only inspect up to the configured body byte limit.

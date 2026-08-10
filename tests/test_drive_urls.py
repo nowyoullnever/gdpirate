@@ -24,13 +24,13 @@ from gdpirate.core.models import ResourceType
         ),
         (
             "https://drive.google.com/open?id=ABC123&amp;usp=sharing",
-            ResourceType.FILE,
-            "https://drive.google.com/file/d/ABC123/view",
+            ResourceType.UNKNOWN,
+            "https://drive.google.com/open?id=ABC123",
         ),
         (
             "https://drive.google.com/uc?export=download&id=ABC123",
-            ResourceType.FILE,
-            "https://drive.google.com/file/d/ABC123/view",
+            ResourceType.UNKNOWN,
+            "https://drive.google.com/open?id=ABC123",
         ),
         (
             "https://drive.google.com/folderview?id=FOLDER123",
@@ -105,23 +105,11 @@ def test_duplicate_representations_have_same_identity():
     ]
 
     identities = {
-        (
-            parse_google_url(url).provider,
-            parse_google_url(url).resource_id,
-            parse_google_url(url).resource_type,
-            parse_google_url(url).canonical_url,
-        )
+        (parse_google_url(url).provider, parse_google_url(url).resource_id)
         for url in variants
     }
 
-    assert identities == {
-        (
-            "google",
-            "ABC123",
-            ResourceType.FILE,
-            "https://drive.google.com/file/d/ABC123/view",
-        )
-    }
+    assert identities == {("google", "ABC123")}
 
 
 def test_extract_google_urls_from_text_trims_punctuation():

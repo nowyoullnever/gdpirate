@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -13,5 +14,22 @@ class CandidateLink(BaseModel):
 class Collector(Protocol):
     name: str
 
-    async def collect(self) -> AsyncIterator[CandidateLink]:
+    async def collect(
+        self, context: "CollectorContext", *, max_items: int | None = None
+    ) -> AsyncIterator[CandidateLink]:
         ...
+
+
+@dataclass
+class CollectorContext:
+    client: object
+    cursor: dict = field(default_factory=dict)
+    unavailable: bool = False
+    error: str | None = None
+
+    def set_cursor(self, scope: str, value: dict) -> None:
+        self.cursor[scope] = value
+
+    def get_cursor(self, scope: str) -> dict:
+        value = self.cursor.get(scope)
+        return value if isinstance(value, dict) else {}
