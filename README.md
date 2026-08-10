@@ -60,6 +60,9 @@ uv run gdpirate validate --max-items 100 --concurrency 3
 uv run gdpirate commoncrawl-crawls
 uv run gdpirate collect commoncrawl --mode url-index --max-files 1 --max-items 100
 uv run gdpirate collect commoncrawl --mode wat --max-files 1 --max-items 100
+uv run gdpirate collect commoncrawl --mode wat --max-files 1 --max-records 10000
+uv run gdpirate collect naver --max-items 10
+uv run gdpirate collect daum --max-items 10
 uv run gdpirate collector-state gdurl
 uv run gdpirate live-access-check
 ```
@@ -78,6 +81,8 @@ Future collectors emit `CandidateLink` objects and call the central ingestion se
 The collector set discovers links from Hacker News, anonymous Bluesky search when available, Lemmy, Misskey, configured RSS/Atom/JSON feeds, Mastodon-compatible Fediverse public timelines, and read-only Nostr relay windows.
 Bulk collectors `gdurl` and `dedigger` are implemented but disabled by default. Enable them with administrator environment flags only: `ENABLE_GDURL=true` or `ENABLE_DEDIGGER=true`. Bulk sources use deferred Google access validation, so newly discovered resources remain `UNKNOWN` until `gdpirate validate` checks them anonymously.
 Common Crawl is also disabled by default with `ENABLE_COMMON_CRAWL=false`. It supports URL Index mode through DuckDB/Parquet and WAT mode through archived WAT metadata. It reads only Common Crawl archive infrastructure, never live source websites, and uses deferred Google validation.
+Common Crawl URL Index processing validates the Parquet schema, consumes DuckDB results in bounded batches, and runs DuckDB work outside the asyncio event loop. WAT scans can be bounded with `--max-records`.
+NAVER and Daum collectors are optional official API collectors. NAVER uses NAVER API HUB headers, and Daum uses the Kakao REST API key. Both are disabled by default, use empty secret values in `.env.example`, and report `unconfigured` when enabled without credentials.
 
 The URL parser accepts known Google Drive, Docs, Sheets, Slides, Forms, and Drawings URL shapes, extracts a stable Google resource identity, and produces deterministic canonical URLs. Lookalike domains are rejected.
 

@@ -1,0 +1,7 @@
+[[queries]]
+query = "drive.google.com"
+enabled = true
+
+[[queries]]
+query = "docs.google.com"
+enabled = true

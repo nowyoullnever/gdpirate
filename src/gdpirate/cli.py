@@ -111,6 +111,7 @@ def collect(
     max_items_per_source: int | None = typer.Option(None, "--max-items-per-source"),
     mode: str | None = typer.Option(None, "--mode"),
     max_files: int | None = typer.Option(None, "--max-files"),
+    max_records: int | None = typer.Option(None, "--max-records"),
 ) -> None:
     async def run() -> None:
         runner = CollectionRunner()
@@ -120,6 +121,7 @@ def collect(
             max_items_per_source=max_items_per_source,
             commoncrawl_mode=mode,
             max_files=max_files,
+            max_records=max_records,
         )
         for result in results:
             typer.echo(

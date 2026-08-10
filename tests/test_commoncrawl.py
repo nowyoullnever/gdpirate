@@ -19,6 +19,8 @@ from gdpirate.collectors.commoncrawl import (
     fetch_path_list,
     query_url_index_part,
     resolve_crawls,
+    validate_url_index_schema,
+    UnsupportedUrlIndexSchema,
 )
 from gdpirate.collectors.base import CandidateLink
 from gdpirate.config import Settings
@@ -78,8 +80,8 @@ async def test_commoncrawl_crawl_resolution_and_path_list():
             return httpx.Response(
                 200,
                 json=[
-                    {"id": "CC-MAIN-2026-30"},
                     {"id": "CC-MAIN-2026-25"},
+                    {"id": "CC-MAIN-2026-30"},
                 ],
             )
         return httpx.Response(200, content=gz)
@@ -143,6 +145,24 @@ def test_url_index_parquet_filters_google_urls(tmp_path):
     assert "output=json" in commoncrawl_index_source_url(
         "CC-MAIN-2026-30", "https://drive.google.com/file/d/ABC123/view"
     )
+
+
+def test_url_index_schema_mismatch_fails_safe(tmp_path):
+    parquet = tmp_path / "bad.parquet"
+    duckdb.execute("CREATE TABLE bad(url VARCHAR, hostname VARCHAR)")
+    duckdb.execute(
+        "INSERT INTO bad VALUES "
+        "('https://drive.google.com/file/d/ABC123/view','drive.google.com')"
+    )
+    duckdb.execute(f"COPY bad TO '{parquet.as_posix()}' (FORMAT PARQUET)")
+    duckdb.execute("DROP TABLE bad")
+
+    try:
+        validate_url_index_schema(str(parquet))
+    except UnsupportedUrlIndexSchema as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("schema mismatch should fail safe")
 
 
 async def test_commoncrawl_url_index_collector_resume_and_deferred(tmp_path):
@@ -257,3 +277,70 @@ async def test_commoncrawl_wat_candidates_source_and_no_live_source_requests(tmp
     assert items[0].source_url == "https://source.example/post"
     assert not any("source.example" in url for url in requested)
     assert not list((tmp_path / "tmp").glob("*.wat.gz"))
+
+
+async def test_commoncrawl_wat_checkpoint_with_zero_candidates_and_max_records(tmp_path):
+    wat = tmp_path / "empty.wat.gz"
+    make_wat_gz(
+        wat,
+        [
+            {
+                "target": "metadata://one",
+                "json": {
+                    "Envelope": {
+                        "WARC-Header-Metadata": {"WARC-Target-URI": "https://source/1"},
+                        "Payload-Metadata": {
+                            "HTTP-Response-Metadata": {
+                                "HTML-Metadata": {"Links": [{"url": "https://example.com"}]}
+                            }
+                        },
+                    }
+                },
+            },
+            {
+                "target": "metadata://two",
+                "json": {
+                    "Envelope": {
+                        "WARC-Header-Metadata": {"WARC-Target-URI": "https://source/2"},
+                        "Payload-Metadata": {
+                            "HTTP-Response-Metadata": {
+                                "HTML-Metadata": [{"url": "https://example.org"}]
+                            }
+                        },
+                    }
+                },
+            },
+        ],
+    )
+    paths = gzip.compress(str(wat).encode() + b"\n")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("collinfo.json"):
+            return httpx.Response(200, json=[{"id": "CC-MAIN-2026-30"}])
+        if str(request.url).endswith("wat.paths.gz"):
+            return httpx.Response(200, content=paths)
+        return httpx.Response(200, content=wat.read_bytes())
+
+    settings = Settings(
+        enable_common_crawl=True,
+        commoncrawl_collinfo_url="https://index.example/collinfo.json",
+        commoncrawl_data_base="https://data.example",
+        commoncrawl_crawls="latest",
+        commoncrawl_checkpoint_record_interval=1,
+        commoncrawl_temp_dir=str(tmp_path / "tmp"),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context = CollectorContext(client=client)
+        items = [
+            item
+            async for item in CommonCrawlCollector(
+                settings,
+                CommonCrawlRunOptions(mode="wat", max_files=1, max_records=1),
+            ).collect(context, max_items=10)
+        ]
+
+    assert items == []
+    state = context.cursor["wat/CC-MAIN-2026-30"]
+    assert context.scanned == 1
+    assert state["record_index"] == 1
+    assert state["links_scanned"] >= 1

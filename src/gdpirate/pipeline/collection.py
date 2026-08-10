@@ -13,6 +13,7 @@ from gdpirate.collectors.feeds import FeedCollector
 from gdpirate.collectors.fediverse import FediverseCollector
 from gdpirate.collectors.gdurl import GdUrlCollector
 from gdpirate.collectors.hackernews import HackerNewsCollector
+from gdpirate.collectors.korea import DaumCollector, NaverCollector
 from gdpirate.collectors.lemmy import LemmyCollector
 from gdpirate.collectors.misskey import MisskeyCollector
 from gdpirate.collectors.nostr import NostrCollector
@@ -54,6 +55,8 @@ def build_collectors(settings: Settings | None = None) -> dict[str, Collector]:
         "feeds": FeedCollector(settings),
         "fediverse": FediverseCollector(settings),
         "nostr": NostrCollector(settings),
+        "naver": NaverCollector(settings),
+        "daum": DaumCollector(settings),
         "gdurl": GdUrlCollector(settings),
         "dedigger": DeDiggerCollector(settings),
         "commoncrawl": CommonCrawlCollector(settings),
@@ -70,6 +73,13 @@ def source_statuses(settings: Settings | None = None) -> dict[str, str]:
         "feeds": "enabled",
         "fediverse": "enabled",
         "nostr": "enabled",
+        "naver": _credential_source_status(
+            settings.enable_naver,
+            bool(settings.naver_api_hub_client_id and settings.naver_api_hub_client_secret),
+        ),
+        "daum": _credential_source_status(
+            settings.enable_daum, bool(settings.kakao_rest_api_key)
+        ),
         "gdurl": "enabled" if settings.enable_gdurl else "disabled",
         "dedigger": "enabled" if settings.enable_dedigger else "disabled",
         "commoncrawl": "enabled"
@@ -97,13 +107,20 @@ class CollectionRunner:
         max_items_per_source: int | None = None,
         commoncrawl_mode: str | None = None,
         max_files: int | None = None,
+        max_records: int | None = None,
     ) -> list[CollectionResult]:
-        if source == "commoncrawl" and commoncrawl_mode:
+        if source == "commoncrawl" and (
+            commoncrawl_mode or max_files is not None or max_records is not None
+        ):
             from gdpirate.collectors.commoncrawl import CommonCrawlRunOptions
 
             self.collectors["commoncrawl"] = CommonCrawlCollector(
                 self.settings,
-                CommonCrawlRunOptions(mode=commoncrawl_mode, max_files=max_files),
+                CommonCrawlRunOptions(
+                    mode=commoncrawl_mode or self.settings.commoncrawl_default_mode,
+                    max_files=max_files,
+                    max_records=max_records,
+                ),
             )
         if source == "all":
             results = []
@@ -119,7 +136,8 @@ class CollectionRunner:
         if source not in self.collectors:
             raise ValueError(f"unknown collector: {source}")
         if not self._collector_enabled(source):
-            return [CollectionResult(source=source, error="collector disabled")]
+            status = source_statuses(self.settings).get(source, "disabled")
+            return [CollectionResult(source=source, error=f"collector {status}")]
         return [await self._collect_one(source, max_items=max_items)]
 
     def _collector_enabled(self, source: str) -> bool:
@@ -129,6 +147,13 @@ class CollectionRunner:
             return self.settings.enable_dedigger
         if source == "commoncrawl":
             return self.settings.enable_common_crawl
+        if source == "naver":
+            return self.settings.enable_naver and bool(
+                self.settings.naver_api_hub_client_id
+                and self.settings.naver_api_hub_client_secret
+            )
+        if source == "daum":
+            return self.settings.enable_daum and bool(self.settings.kakao_rest_api_key)
         return True
 
     async def _collect_one(
@@ -236,3 +261,9 @@ class IngestionResultWithStatus:
     def __init__(self, original, status):
         self.__dict__.update(original.__dict__)
         self.access_status = status
+
+
+def _credential_source_status(enabled: bool, configured: bool) -> str:
+    if not enabled:
+        return "disabled"
+    return "enabled" if configured else "unconfigured"

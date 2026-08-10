@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+import asyncio
+from contextlib import aclosing
 import gzip
 import io
 import json
@@ -24,6 +26,7 @@ CRAWL_RE = re.compile(r"^CC-MAIN-\d{4}-\d{2}$")
 class CommonCrawlRunOptions:
     mode: str = "url-index"
     max_files: int | None = None
+    max_records: int | None = None
 
 
 class CommonCrawlCollector:
@@ -62,23 +65,40 @@ class CommonCrawlCollector:
         scope = f"url-index/{crawl}"
         state = context.get_cursor(scope)
         start_index = int(state.get("path_index", 0))
-        paths = await fetch_path_list(context.client, self.settings, crawl, "cc-index-table.paths.gz")
         processed_files = 0
-        for path_index, path in enumerate(paths[start_index:], start=start_index):
+        async for path_index, path in iter_path_list(
+            context.client,
+            self.settings,
+            crawl,
+            "cc-index-table.paths.gz",
+            start_index,
+        ):
             if self.options.max_files is not None and processed_files >= self.options.max_files:
                 return
-            for raw_url in query_url_index_part(commoncrawl_data_url(self.settings, path)):
-                if max_items is not None and context.scanned >= max_items:
-                    await context.checkpoint(
-                        scope, {"path_index": path_index, "current_path": path}
-                    )
+            iterator = iter_url_index_part_batches(
+                commoncrawl_data_url(self.settings, path),
+                self.settings.commoncrawl_url_index_batch_size,
+            )
+            while True:
+                try:
+                    batch = await asyncio.to_thread(next, iterator, None)
+                except UnsupportedUrlIndexSchema as exc:
+                    context.error = str(exc)
                     return
-                context.mark_scanned()
-                yield CandidateLink(
-                    raw_url=raw_url,
-                    source_name=self.source_name,
-                    source_url=commoncrawl_index_source_url(crawl, raw_url),
-                )
+                if batch is None:
+                    break
+                for raw_url in batch:
+                    if max_items is not None and context.scanned >= max_items:
+                        await context.checkpoint(
+                            scope, {"path_index": path_index, "current_path": path}
+                        )
+                        return
+                    context.mark_scanned()
+                    yield CandidateLink(
+                        raw_url=raw_url,
+                        source_name=self.source_name,
+                        source_url=commoncrawl_index_source_url(crawl, raw_url),
+                    )
             processed_files += 1
             await context.checkpoint(scope, {"path_index": path_index + 1})
 
@@ -89,11 +109,13 @@ class CommonCrawlCollector:
         state = context.get_cursor(scope)
         start_index = int(state.get("path_index", 0))
         record_resume = int(state.get("record_index", 0))
-        paths = await fetch_path_list(context.client, self.settings, crawl, "wat.paths.gz")
         temp_dir = Path(self.settings.commoncrawl_temp_dir)
         temp_dir.mkdir(parents=True, exist_ok=True)
         processed_files = 0
-        for path_index, path in enumerate(paths[start_index:], start=start_index):
+        records_this_run = 0
+        async for path_index, path in iter_path_list(
+            context.client, self.settings, crawl, "wat.paths.gz", start_index
+        ):
             if self.options.max_files is not None and processed_files >= self.options.max_files:
                 return
             temp_path = temp_dir / Path(path).name
@@ -104,33 +126,58 @@ class CommonCrawlCollector:
                     temp_path,
                 )
                 context.cursor.setdefault(scope, {})["bytes_downloaded"] = bytes_downloaded
-                async for record_index, candidate in iter_wat_candidates(
-                    temp_path, record_resume
-                ):
-                    if max_items is not None and context.scanned >= max_items:
-                        await context.checkpoint(
-                            scope,
-                            {
-                                "path_index": path_index,
-                                "current_path": path,
-                                "record_index": record_index,
-                            },
-                        )
-                        return
-                    context.mark_scanned()
-                    yield candidate
-                    if record_index % self.settings.commoncrawl_checkpoint_record_interval == 0:
-                        await context.checkpoint(
-                            scope,
-                            {
-                                "path_index": path_index,
-                                "current_path": path,
-                                "record_index": record_index,
-                            },
-                        )
+                async with aclosing(iter_wat_events(temp_path, record_resume)) as events:
+                    async for event in events:
+                        if event["type"] == "progress":
+                            records_this_run += 1
+                            if (
+                                self.options.max_records is not None
+                                and records_this_run > self.options.max_records
+                            ):
+                                await context.checkpoint(
+                                    scope,
+                                    {
+                                        "path_index": path_index,
+                                        "current_path": path,
+                                        "record_index": event["record_index"],
+                                        **_wat_metrics(context, scope),
+                                    },
+                                )
+                                return
+                            context.mark_scanned()
+                            if event["record_index"] % self.settings.commoncrawl_checkpoint_record_interval == 0:
+                                await context.checkpoint(
+                                    scope,
+                                    {
+                                        "path_index": path_index,
+                                        "current_path": path,
+                                        "record_index": event["record_index"],
+                                        **_wat_metrics(context, scope),
+                                    },
+                                )
+                            continue
+                        if event["type"] == "links":
+                            _inc_metric(context, scope, "links_scanned", event["links_scanned"])
+                            continue
+                        candidate = event["candidate"]
+                        record_index = event["record_index"]
+                        _inc_metric(context, scope, "google_candidates")
+                        if max_items is not None and _metric(context, scope, "google_candidates") > max_items:
+                            await context.checkpoint(
+                                scope,
+                                {
+                                    "path_index": path_index,
+                                    "current_path": path,
+                                    "record_index": record_index,
+                                    **_wat_metrics(context, scope),
+                                },
+                            )
+                            return
+                        yield candidate
                 processed_files += 1
+                _inc_metric(context, scope, "files_processed")
                 record_resume = 0
-                await context.checkpoint(scope, {"path_index": path_index + 1, "record_index": 0})
+                await context.checkpoint(scope, {"path_index": path_index + 1, "record_index": 0, **_wat_metrics(context, scope)})
             finally:
                 temp_path.unlink(missing_ok=True)
 
@@ -144,7 +191,10 @@ async def fetch_collinfo(client: httpx.AsyncClient, settings: Settings) -> list[
 async def resolve_crawls(client: httpx.AsyncClient, settings: Settings) -> list[str]:
     configured = settings.commoncrawl_crawl_list
     collinfo = await fetch_collinfo(client, settings)
-    available = [item["id"] for item in collinfo if CRAWL_RE.fullmatch(item.get("id", ""))]
+    available = sorted(
+        [item["id"] for item in collinfo if CRAWL_RE.fullmatch(item.get("id", ""))],
+        reverse=True,
+    )
     if configured == ["latest"]:
         return available[:1]
     resolved = []
@@ -160,29 +210,72 @@ async def resolve_crawls(client: httpx.AsyncClient, settings: Settings) -> list[
 async def fetch_path_list(
     client: httpx.AsyncClient, settings: Settings, crawl: str, filename: str
 ) -> list[str]:
+    return [
+        path
+        async for _index, path in iter_path_list(client, settings, crawl, filename)
+    ]
+
+
+async def iter_path_list(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    crawl: str,
+    filename: str,
+    start_index: int = 0,
+) -> AsyncIterator[tuple[int, str]]:
     url = f"{settings.commoncrawl_data_base.rstrip('/')}/crawl-data/{crawl}/{filename}"
     response = await client.get(url)
     response.raise_for_status()
     with gzip.GzipFile(fileobj=io.BytesIO(response.content)) as gz:
-        return [line.decode("utf-8").strip() for line in gz if line.strip()]
+        for index, line in enumerate(gz):
+            path = line.decode("utf-8").strip()
+            if path and index >= start_index:
+                yield index, path
 
 
-def query_url_index_part(parquet_url: str) -> list[str]:
+class UnsupportedUrlIndexSchema(RuntimeError):
+    pass
+
+
+def validate_url_index_schema(parquet_url: str) -> None:
+    rows = duckdb.execute(
+        "DESCRIBE SELECT * FROM read_parquet(?) LIMIT 0", [parquet_url]
+    ).fetchall()
+    columns = {row[0] for row in rows}
+    missing = {"url", "url_host_name"} - columns
+    if missing:
+        raise UnsupportedUrlIndexSchema(
+            f"unsupported Common Crawl URL Index schema, missing: {', '.join(sorted(missing))}"
+        )
+
+
+def iter_url_index_part_batches(parquet_url: str, batch_size: int):
+    validate_url_index_schema(parquet_url)
     hosts = ", ".join(repr(host) for host in GOOGLE_HOSTS)
     query = (
         "SELECT url FROM read_parquet(?) "
         f"WHERE url_host_name IN ({hosts})"
     )
-    try:
-        rows = duckdb.execute(query, [parquet_url]).fetchall()
-    except Exception:
-        rows = duckdb.execute("SELECT url FROM read_parquet(?)", [parquet_url]).fetchall()
-    urls = []
-    for (raw_url,) in rows:
-        parsed = parse_google_url(str(raw_url))
-        if parsed:
-            urls.append(str(raw_url))
-    return urls
+    cursor = duckdb.execute(query, [parquet_url])
+    while True:
+        rows = cursor.fetchmany(batch_size)
+        if not rows:
+            break
+        batch = []
+        for (raw_url,) in rows:
+            parsed = parse_google_url(str(raw_url))
+            if parsed:
+                batch.append(str(raw_url))
+        yield batch
+
+
+def iter_url_index_part(parquet_url: str, batch_size: int):
+    for batch in iter_url_index_part_batches(parquet_url, batch_size):
+        yield from batch
+
+
+def query_url_index_part(parquet_url: str) -> list[str]:
+    return list(iter_url_index_part(parquet_url, 1000))
 
 
 async def download_to_file(client: httpx.AsyncClient, url: str, path: Path) -> int:
@@ -201,13 +294,14 @@ async def download_to_file(client: httpx.AsyncClient, url: str, path: Path) -> i
     return total
 
 
-async def iter_wat_candidates(
+async def iter_wat_events(
     wat_path: Path, resume_record_index: int = 0
-) -> AsyncIterator[tuple[int, CandidateLink]]:
+) -> AsyncIterator[dict]:
     with wat_path.open("rb") as stream:
         for record_index, record in enumerate(ArchiveIterator(stream)):
             if record_index < resume_record_index:
                 continue
+            yield {"type": "progress", "record_index": record_index}
             if record.rec_type != "metadata":
                 continue
             try:
@@ -226,19 +320,34 @@ async def iter_wat_candidates(
                 .get("HTML-Metadata", {})
                 .get("Links", [])
             )
+            links_scanned = len(links or [])
+            yield {
+                "type": "links",
+                "record_index": record_index,
+                "links_scanned": links_scanned,
+            }
             for link in links or []:
                 raw = link.get("url") or link.get("href") or link.get("path")
                 if not raw:
                     continue
                 for google_url in extract_google_urls(str(raw)):
-                    yield (
-                        record_index,
-                        CandidateLink(
+                    yield {
+                        "type": "candidate",
+                        "record_index": record_index,
+                        "candidate": CandidateLink(
                             raw_url=google_url,
                             source_name="Common Crawl",
                             source_url=target,
                         ),
-                    )
+                    }
+
+
+async def iter_wat_candidates(
+    wat_path: Path, resume_record_index: int = 0
+) -> AsyncIterator[tuple[int, CandidateLink]]:
+    async for event in iter_wat_events(wat_path, resume_record_index):
+        if event["type"] == "candidate":
+            yield event["record_index"], event["candidate"]
 
 
 def commoncrawl_index_source_url(crawl: str, raw_url: str) -> str:
@@ -249,3 +358,19 @@ def commoncrawl_data_url(settings: Settings, path: str) -> str:
     if re.match(r"^[A-Za-z]:[\\/]", path) or path.startswith("/") or path.startswith("http"):
         return path
     return f"{settings.commoncrawl_data_base.rstrip('/')}/{path}"
+
+
+def _metric(context: CollectorContext, scope: str, name: str) -> int:
+    return int(context.cursor.setdefault(scope, {}).get(name, 0))
+
+
+def _inc_metric(context: CollectorContext, scope: str, name: str, amount: int = 1) -> None:
+    state = context.cursor.setdefault(scope, {})
+    state[name] = int(state.get(name, 0)) + amount
+
+
+def _wat_metrics(context: CollectorContext, scope: str) -> dict:
+    return {
+        key: _metric(context, scope, key)
+        for key in ("files_processed", "links_scanned", "google_candidates", "bytes_downloaded")
+    }
