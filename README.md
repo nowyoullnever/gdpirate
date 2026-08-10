@@ -2,9 +2,9 @@
 
 GDPirate is a small Python project for storing Google Drive and Google Docs links that were discovered on public internet sources and are accessible to an anonymous visitor.
 
-This repository currently implements Task 1 only: project structure, configuration, database schema, Google URL parsing and normalization, deduplication, source storage, anonymous access checking, CLI utilities, and tests.
+This repository implements project structure, configuration, database schema, Google URL parsing and normalization, deduplication, source storage, anonymous access checking, collectors, validation, a random-link API, a minimal web UI, CLI utilities, and tests.
 
-It does not implement collectors, a frontend, brute forcing, Google account access, OAuth, Drive API credentials, file downloading, folder crawling, or permission bypassing.
+It does not implement brute forcing, Google account access, OAuth, Drive API credentials, file downloading, folder crawling, public statistics, admin UI, source selectors, or permission bypassing.
 
 ## Install
 
@@ -65,7 +65,18 @@ uv run gdpirate collect naver --max-items 10
 uv run gdpirate collect daum --max-items 10
 uv run gdpirate collector-state gdurl
 uv run gdpirate live-access-check
+uv run gdpirate serve
 ```
+
+## Web
+
+Initialize the database, collect links, validate them, then run:
+
+```bash
+uv run gdpirate serve
+```
+
+The local app listens on `http://127.0.0.1:8000` by default. `GET /healthz` returns `{"status":"ok"}`. `GET /api/random` returns one verified public Drive URL and its source with `Cache-Control: no-store`, or `503 {"error":"no_verified_public_link_available"}` when no eligible row exists.
 
 ## Tests
 
@@ -87,6 +98,7 @@ NAVER and Daum collectors are optional official API collectors. NAVER uses NAVER
 The URL parser accepts known Google Drive, Docs, Sheets, Slides, Forms, and Drawings URL shapes, extracts a stable Google resource identity, and produces deterministic canonical URLs. Lookalike domains are rejected.
 
 Deduplication is based on the actual Google resource identity through a unique `(provider, resource_id)` constraint. GDPirate stores one source name and source URL per resource; it does not keep discovery history or occurrence counts. If a later URL reveals a more specific Google resource type, the stored type and canonical URL are upgraded.
+Random web selection uses a deterministic indexed `random_key` and wraps around the keyspace instead of using `ORDER BY RANDOM()`. Only `PUBLIC` rows with a stored source URL are eligible, and stale links are anonymously rechecked before they are returned.
 
 Anonymous access checking uses `httpx.AsyncClient` without Google cookies, OAuth, browser state, or stored credentials. Uncertain results fail closed to `UNKNOWN`, not `PUBLIC`.
 Access checks use bounded streaming and only inspect up to the configured body byte limit.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+import hashlib
 import json
 import tomllib
 from xml.etree import ElementTree
@@ -27,10 +28,11 @@ class FeedCollector:
             feed_url = str(feed["url"])
             scope = feed_url
             state = context.get_cursor(scope)
+            processed_entry_keys = set(state.get("processed_entry_keys") or [])
             headers = {}
-            if state.get("etag"):
+            if not state.get("partial") and state.get("etag"):
                 headers["If-None-Match"] = state["etag"]
-            if state.get("last_modified"):
+            if not state.get("partial") and state.get("last_modified"):
                 headers["If-Modified-Since"] = state["last_modified"]
             response = await request_with_retries(
                 context.client, "GET", feed_url, headers=headers
@@ -46,10 +48,16 @@ class FeedCollector:
                 response.headers.get("Content-Type", ""),
             )
             for entry in entries:
+                entry_key = _feed_entry_key(entry)
+                if entry_key in processed_entry_keys:
+                    continue
                 if max_items is not None and context.scanned >= max_items:
-                    await context.checkpoint(scope, _feed_state(response, entry))
+                    await context.checkpoint(
+                        scope, _partial_feed_state(state, processed_entry_keys)
+                    )
                     return
                 context.mark_scanned()
+                processed_entry_keys.add(entry_key)
                 source_url = entry.source_url or feed_url
                 for raw_url in extract_google_urls(entry.text):
                     yield CandidateLink(
@@ -59,7 +67,9 @@ class FeedCollector:
                     )
                     emitted += 1
                     if max_items is not None and emitted >= max_items:
-                        await context.checkpoint(scope, _feed_state(response, entry))
+                        await context.checkpoint(
+                            scope, _partial_feed_state(state, processed_entry_keys)
+                        )
                         return
             latest = entries[0] if entries else None
             await context.checkpoint(scope, _feed_state(response, latest))
@@ -86,7 +96,27 @@ def _feed_state(response, entry: FeedEntry | None) -> dict:
         "last_modified": response.headers.get("Last-Modified"),
         "latest_entry_id": entry.entry_id if entry else None,
         "latest_entry_timestamp": entry.timestamp if entry else None,
+        "partial": False,
+        "processed_entry_keys": [],
     }
+
+
+def _partial_feed_state(previous_state: dict, processed_entry_keys: set[str]) -> dict:
+    return {
+        "etag": previous_state.get("etag"),
+        "last_modified": previous_state.get("last_modified"),
+        "latest_entry_id": previous_state.get("latest_entry_id"),
+        "latest_entry_timestamp": previous_state.get("latest_entry_timestamp"),
+        "partial": True,
+        "processed_entry_keys": sorted(processed_entry_keys)[-1000:],
+    }
+
+
+def _feed_entry_key(entry: FeedEntry) -> str:
+    stable = entry.entry_id or entry.source_url
+    if stable:
+        return str(stable)
+    return hashlib.sha256(entry.text.encode("utf-8")).hexdigest()
 
 
 def _load_feed_config(path: str) -> list[dict]:

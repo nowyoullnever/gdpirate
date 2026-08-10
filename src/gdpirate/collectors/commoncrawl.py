@@ -32,6 +32,7 @@ class CommonCrawlRunOptions:
 class CommonCrawlCollector:
     name = "commoncrawl"
     source_name = "Common Crawl"
+    url_index_source_name = "Common Crawl URL Index"
     bulk = True
 
     def __init__(
@@ -65,6 +66,7 @@ class CommonCrawlCollector:
         scope = f"url-index/{crawl}"
         state = context.get_cursor(scope)
         start_index = int(state.get("path_index", 0))
+        row_offset = int(state.get("row_offset", 0))
         processed_files = 0
         async for path_index, path in iter_path_list(
             context.client,
@@ -78,7 +80,10 @@ class CommonCrawlCollector:
             iterator = iter_url_index_part_batches(
                 commoncrawl_data_url(self.settings, path),
                 self.settings.commoncrawl_url_index_batch_size,
+                row_offset,
+                include_offsets=True,
             )
+            rows_seen_in_path = row_offset
             while True:
                 try:
                     batch = await asyncio.to_thread(next, iterator, None)
@@ -87,20 +92,27 @@ class CommonCrawlCollector:
                     return
                 if batch is None:
                     break
-                for raw_url in batch:
+                for query_row_offset, raw_url in batch:
                     if max_items is not None and context.scanned >= max_items:
                         await context.checkpoint(
-                            scope, {"path_index": path_index, "current_path": path}
+                            scope,
+                            {
+                                "path_index": path_index,
+                                "current_path": path,
+                                "row_offset": rows_seen_in_path,
+                            },
                         )
                         return
                     context.mark_scanned()
+                    rows_seen_in_path = query_row_offset + 1
                     yield CandidateLink(
                         raw_url=raw_url,
-                        source_name=self.source_name,
+                        source_name=self.url_index_source_name,
                         source_url=commoncrawl_index_source_url(crawl, raw_url),
                     )
             processed_files += 1
-            await context.checkpoint(scope, {"path_index": path_index + 1})
+            row_offset = 0
+            await context.checkpoint(scope, {"path_index": path_index + 1, "row_offset": 0})
 
     async def _collect_wat(
         self, context: CollectorContext, crawl: str, max_items: int | None
@@ -249,14 +261,22 @@ def validate_url_index_schema(parquet_url: str) -> None:
         )
 
 
-def iter_url_index_part_batches(parquet_url: str, batch_size: int):
+def iter_url_index_part_batches(
+    parquet_url: str,
+    batch_size: int,
+    row_offset: int = 0,
+    *,
+    include_offsets: bool = False,
+):
     validate_url_index_schema(parquet_url)
     hosts = ", ".join(repr(host) for host in GOOGLE_HOSTS)
     query = (
         "SELECT url FROM read_parquet(?) "
         f"WHERE url_host_name IN ({hosts})"
+        "LIMIT 9223372036854775807 OFFSET ?"
     )
-    cursor = duckdb.execute(query, [parquet_url])
+    cursor = duckdb.execute(query, [parquet_url, row_offset])
+    query_row_offset = row_offset
     while True:
         rows = cursor.fetchmany(batch_size)
         if not rows:
@@ -265,7 +285,11 @@ def iter_url_index_part_batches(parquet_url: str, batch_size: int):
         for (raw_url,) in rows:
             parsed = parse_google_url(str(raw_url))
             if parsed:
-                batch.append(str(raw_url))
+                if include_offsets:
+                    batch.append((query_row_offset, str(raw_url)))
+                else:
+                    batch.append(str(raw_url))
+            query_row_offset += 1
         yield batch
 
 

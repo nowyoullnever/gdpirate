@@ -31,11 +31,15 @@ class NostrCollector:
         self, context: CollectorContext, *, max_items: int | None = None
     ) -> AsyncIterator[CandidateLink]:
         emitted = 0
+        self._seen_event_ids = set()
         for relay in self.settings.nostr_relay_list:
             scope = relay
             state = context.get_cursor(scope)
             until = int(state.get("until") or time.time())
+            boundary_event_ids = set(state.get("boundary_event_ids") or [])
             oldest_seen = until
+            events_seen = 0
+            oldest_event_ids: set[str] = set()
             try:
                 async with self.connector(relay, open_timeout=10) as websocket:
                     sub_id = f"gdpirate-{uuid4().hex[:8]}"
@@ -44,7 +48,11 @@ class NostrCollector:
                             [
                                 "REQ",
                                 sub_id,
-                                {"kinds": [1, 30023], "until": until, "limit": 100},
+                                {
+                                    "kinds": [1, 30023],
+                                    "until": until,
+                                    "limit": self.settings.nostr_batch_limit,
+                                },
                             ]
                         )
                     )
@@ -52,25 +60,28 @@ class NostrCollector:
                         try:
                             message = await asyncio.wait_for(websocket.recv(), timeout=20)
                         except TimeoutError:
-                            await context.checkpoint(scope, {"until": oldest_seen - 1})
                             break
                         payload = json.loads(message)
                         msg_type = payload[0] if payload else None
                         if msg_type == "EVENT" and len(payload) >= 3:
                             event = payload[2]
                             event_id = event.get("id")
+                            created_at = int(event.get("created_at") or until)
+                            if created_at == until and event_id in boundary_event_ids:
+                                continue
                             if event_id in self._seen_event_ids:
                                 continue
                             if event_id:
                                 self._seen_event_ids.add(event_id)
                             if max_items is not None and context.scanned >= max_items:
-                                await context.checkpoint(
-                                    scope, {"until": oldest_seen - 1}
-                                )
                                 return
                             context.mark_scanned()
-                            created_at = int(event.get("created_at") or until)
-                            oldest_seen = min(oldest_seen, created_at)
+                            events_seen += 1
+                            if created_at < oldest_seen:
+                                oldest_seen = created_at
+                                oldest_event_ids = {event_id} if event_id else set()
+                            elif created_at == oldest_seen and event_id:
+                                oldest_event_ids.add(event_id)
                             text = _event_text(event)
                             source_url = nostr_source_url(
                                 self.settings.nostr_viewer_base, event_id
@@ -83,12 +94,25 @@ class NostrCollector:
                                 )
                                 emitted += 1
                                 if max_items is not None and emitted >= max_items:
-                                    await context.checkpoint(
-                                        scope, {"until": oldest_seen - 1}
-                                    )
                                     return
                         elif msg_type == "EOSE":
-                            await context.checkpoint(scope, {"until": oldest_seen - 1})
+                            if events_seen >= self.settings.nostr_batch_limit and oldest_seen == until:
+                                await context.checkpoint(
+                                    scope,
+                                    {
+                                        "until": until,
+                                        "boundary_event_ids": sorted(oldest_event_ids),
+                                        "status": "saturated_timestamp_boundary",
+                                    },
+                                )
+                            else:
+                                await context.checkpoint(
+                                    scope,
+                                    {
+                                        "until": oldest_seen,
+                                        "boundary_event_ids": sorted(oldest_event_ids),
+                                    },
+                                )
                             break
                         elif msg_type in {"CLOSED", "NOTICE"}:
                             text = str(payload[-1]).lower() if payload else ""

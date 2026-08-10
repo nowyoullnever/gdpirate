@@ -1,7 +1,7 @@
 import enum
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Enum, String, Text, UniqueConstraint
+from sqlalchemy import Float, Index, JSON, DateTime, Enum, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -39,6 +39,7 @@ class DriveLink(Base):
             "resource_id",
             name="uq_drive_links_identity",
         ),
+        Index("ix_drive_links_status_random", "access_status", "random_key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -48,6 +49,7 @@ class DriveLink(Base):
         Enum(ResourceType, native_enum=False, length=32), nullable=False
     )
     canonical_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    random_key: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     source_name: Mapped[str] = mapped_column(String(128), nullable=False)
     source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     access_status: Mapped[AccessStatus] = mapped_column(

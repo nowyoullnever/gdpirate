@@ -197,7 +197,7 @@ async def test_commoncrawl_url_index_collector_resume_and_deferred(tmp_path):
         ]
 
     assert len(items) == 1
-    assert items[0].source_name == "Common Crawl"
+    assert items[0].source_name == "Common Crawl URL Index"
     assert context.cursor["url-index/CC-MAIN-2026-30"]["path_index"] == 1
 
 

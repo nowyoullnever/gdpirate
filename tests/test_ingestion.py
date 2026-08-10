@@ -125,6 +125,30 @@ async def test_duplicate_can_fill_missing_source_url(session):
     assert link.source_url == "https://example.com/second"
 
 
+async def test_duplicate_keeps_higher_quality_source(session):
+    service = IngestionService(session, StaticAccessChecker())
+
+    await service.ingest(
+        CandidateLink(
+            raw_url="https://drive.google.com/file/d/ABC123/view",
+            source_name="Common Crawl",
+            source_url="https://source.example/page",
+        )
+    )
+    await service.ingest(
+        CandidateLink(
+            raw_url="https://drive.google.com/open?id=ABC123",
+            source_name="Common Crawl URL Index",
+            source_url="https://index.commoncrawl.org/x",
+        )
+    )
+
+    link = (await session.execute(select(DriveLink))).scalar_one()
+    assert link.source_name == "Common Crawl"
+    assert link.source_url == "https://source.example/page"
+    assert 0 <= link.random_key < 1
+
+
 async def test_recent_duplicate_skips_access_recheck(session):
     checker = StaticAccessChecker(AccessStatus.PUBLIC)
     service = IngestionService(

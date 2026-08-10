@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     fediverse_local_only: bool = True
     nostr_relays: str = "wss://nos.lol,wss://relay.primal.net"
     nostr_viewer_base: str = "https://njump.me"
+    nostr_batch_limit: int = 100
     gdurl_browse_url: str = "https://gdurl.com/all"
     gdurl_request_delay_seconds: float = 1.0
     gdurl_max_concurrency: int = 1

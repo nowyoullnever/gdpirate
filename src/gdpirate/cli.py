@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import typer
+import uvicorn
 from alembic import command
 from alembic.config import Config
 
@@ -148,6 +149,15 @@ def commoncrawl_crawls() -> None:
                     typer.echo(crawl_id)
 
     asyncio.run(run())
+
+
+@app.command("serve")
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+) -> None:
+    """Serve the minimal random-link web app."""
+    uvicorn.run("gdpirate.web:app", host=host, port=port)
 
 
 @app.command("validate")

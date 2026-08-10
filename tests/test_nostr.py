@@ -61,7 +61,67 @@ async def test_nostr_req_event_eose_duplicate_and_source_url():
     assert items[0].source_name == "Nostr"
     assert items[0].source_url == nostr_source_url("https://njump.me", event_id)
     assert sockets["wss://one"].sent[0][0] == "REQ"
+    assert context.cursor["wss://one"]["until"] == 100
+    assert context.cursor["wss://one"]["boundary_event_ids"] == [event_id]
+
+
+async def test_nostr_skips_previous_boundary_and_only_checkpoints_eose():
+    old_event = {
+        "id": "11" * 32,
+        "kind": 1,
+        "created_at": 100,
+        "content": "https://drive.google.com/file/d/OLD123/view",
+    }
+    new_event = {
+        "id": "22" * 32,
+        "kind": 1,
+        "created_at": 99,
+        "content": "https://drive.google.com/file/d/NEW123/view",
+    }
+    sockets = {
+        "wss://one": FakeWebSocket(
+            [
+                json.dumps(["EVENT", "sub", old_event]),
+                json.dumps(["EVENT", "sub", new_event]),
+                json.dumps(["EOSE", "sub"]),
+            ]
+        )
+    }
+    collector = NostrCollector(
+        Settings(nostr_relays="wss://one", nostr_batch_limit=10),
+        connector=connector_factory(sockets),
+    )
+    context = CollectorContext(
+        client=None,
+        cursor={"wss://one": {"until": 100, "boundary_event_ids": ["11" * 32]}},
+    )
+
+    items = [item async for item in collector.collect(context, max_items=10)]
+
+    assert [item.raw_url for item in items] == [
+        "https://drive.google.com/file/d/NEW123/view"
+    ]
     assert context.cursor["wss://one"]["until"] == 99
+
+
+async def test_nostr_max_items_does_not_advance_checkpoint():
+    event = {
+        "id": "33" * 32,
+        "kind": 1,
+        "created_at": 100,
+        "content": "https://drive.google.com/file/d/ABC123/view",
+    }
+    sockets = {"wss://one": FakeWebSocket([json.dumps(["EVENT", "sub", event])])}
+    collector = NostrCollector(
+        Settings(nostr_relays="wss://one"),
+        connector=connector_factory(sockets),
+    )
+    context = CollectorContext(client=None)
+
+    items = [item async for item in collector.collect(context, max_items=1)]
+
+    assert items
+    assert "wss://one" not in context.cursor
 
 
 def test_note_bech32_encoding_known_zero_id():

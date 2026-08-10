@@ -13,10 +13,12 @@ from gdpirate.core.access_check import AccessChecker
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import ParsedGoogleUrl, canonical_url, parse_google_url
 from gdpirate.core.models import AccessStatus, DriveLink
+from gdpirate.core.random_key import stable_random_key
 from gdpirate.core.resource_types import (
     is_contradictory_type,
     should_upgrade_resource_type,
 )
+from gdpirate.core.source_quality import should_replace_source
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ class IngestionService:
             resource_id=parsed.resource_id,
             resource_type=parsed.resource_type,
             canonical_url=parsed.canonical_url,
+            random_key=stable_random_key(parsed.provider, parsed.resource_id),
             source_name=candidate.source_name,
             source_url=candidate.source_url,
         )
@@ -158,7 +161,12 @@ class IngestionService:
     def _merge_discovery(
         self, link: DriveLink, candidate: CandidateLink, parsed: ParsedGoogleUrl
     ) -> None:
-        if not link.source_url and candidate.source_url:
+        if should_replace_source(
+            link.source_name,
+            link.source_url,
+            candidate.source_name,
+            candidate.source_url,
+        ):
             link.source_name = candidate.source_name
             link.source_url = candidate.source_url
         if should_upgrade_resource_type(link.resource_type, parsed.resource_type):
