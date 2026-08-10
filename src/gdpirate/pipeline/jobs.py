@@ -6,6 +6,7 @@ from pathlib import Path
 import tomllib
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from gdpirate.config import Settings, get_settings
@@ -13,6 +14,15 @@ from gdpirate.core.database import SessionLocal
 from gdpirate.core.models import AccessStatus, ScheduledJobState, utc_now
 from gdpirate.pipeline.collection import CollectionRunner, CollectionStateMode
 from gdpirate.pipeline.validation import validate_links
+
+
+class TotalCollectionFailure(RuntimeError):
+    def __init__(self, failed_sources: list[str], summary: dict) -> None:
+        self.failed_sources = failed_sources
+        self.summary = summary
+        super().__init__(
+            f"all configured sources failed: {', '.join(failed_sources[:20])}"
+        )
 
 
 @dataclass(frozen=True)
@@ -65,8 +75,14 @@ async def ensure_job_state(session, job: JobConfig) -> ScheduledJobState:
             consecutive_failures=0,
             updated_at=utc_now(),
         )
-        session.add(state)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(state)
+                await session.flush()
+        except IntegrityError:
+            state = await get_job_state(session, job.name)
+            if state is None:
+                raise
     return state
 
 
@@ -154,6 +170,8 @@ class JobExecutor:
     async def _collect(self, job: JobConfig) -> dict:
         summary = {
             "sources": 0,
+            "successful_sources": 0,
+            "failed_sources": 0,
             "scanned": 0,
             "candidates": 0,
             "created": 0,
@@ -164,6 +182,7 @@ class JobExecutor:
             "unknown": 0,
             "errors": 0,
         }
+        failed_source_names = []
         for source in job.sources:
             try:
                 results = await self.collection_runner.collect(
@@ -173,13 +192,30 @@ class JobExecutor:
                 )
             except Exception:
                 summary["errors"] += 1
+                summary["failed_sources"] += 1
+                failed_source_names.append(source)
                 continue
             for result in results:
                 summary["sources"] += 1
-                for key in ("scanned", "candidates", "created", "duplicates", "public", "restricted", "dead", "unknown"):
+                for key in (
+                    "scanned",
+                    "candidates",
+                    "created",
+                    "duplicates",
+                    "public",
+                    "restricted",
+                    "dead",
+                    "unknown",
+                ):
                     summary[key] += int(getattr(result, key))
-                if result.error:
+                if result.error or result.unavailable:
                     summary["errors"] += 1
+                    summary["failed_sources"] += 1
+                    failed_source_names.append(result.source)
+                else:
+                    summary["successful_sources"] += 1
+        if summary["successful_sources"] == 0 and summary["failed_sources"] > 0:
+            raise TotalCollectionFailure(failed_source_names, summary)
         return summary
 
     async def _validate(self, job: JobConfig) -> dict:

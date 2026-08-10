@@ -124,7 +124,7 @@ uv run gdpirate jobs
 uv run gdpirate run-job recent
 ```
 
-The worker runs recent fresh-head collection, persistent feed polling, historical backfill, UNKNOWN validation, and stale PUBLIC revalidation. One job failure is recorded with bounded backoff and does not stop other due jobs. Heavy collectors (`gdurl`, `dedigger`, `commoncrawl`) and credentialed Korean APIs (`naver`, `daum`) are not scheduled by default.
+The worker runs recent fresh-head collection, persistent feed polling, historical backfill, UNKNOWN validation, and stale PUBLIC revalidation. Partial collection failures are recorded in the job summary but use the normal interval when at least one source succeeds. If every configured source fails, the job is marked failed and bounded backoff applies. Heavy collectors (`gdurl`, `dedigger`, `commoncrawl`) and credentialed Korean APIs (`naver`, `daum`) are not scheduled by default.
 
 The FastAPI process does not run collectors, validation, or scheduling.
 
@@ -135,10 +135,10 @@ For a production-like PostgreSQL stack:
 ```bash
 copy .env.docker.example .env.docker
 # edit POSTGRES_PASSWORD and DATABASE_URL
-docker compose up --build
+docker compose --env-file .env.docker up --build
 ```
 
-Compose starts PostgreSQL, runs `gdpirate init-db` in a migration service, then starts separate web and worker services. PostgreSQL data is stored in a named volume. The public app is available at `http://127.0.0.1:8000` by default.
+Compose starts PostgreSQL 18, runs `gdpirate init-db` in a migration service, then starts separate web and worker services. PostgreSQL data is stored in the named `postgres-data` volume mounted at `/var/lib/postgresql`. `docker compose down` preserves that volume; `docker compose down -v` deletes it. The public app is available at `http://127.0.0.1:8000` by default.
 
 ## Tests
 

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -92,3 +93,85 @@ async def test_sqlite_job_lock_prevents_same_process_duplicate():
             assert not second.acquired
     async with JobLock("recent", settings=settings) as third:
         assert third.acquired
+
+
+def test_compose_uses_postgresql_18_volume_layout():
+    text = Path("compose.yaml").read_text()
+
+    assert "image: postgres:18" in text
+    assert "postgres-data:/var/lib/postgresql" in text
+    assert "postgres-data:/var/lib/postgresql/data" not in text
+
+
+class FakeLockEngine:
+    def __init__(self, acquired=True):
+        self.connection = FakeLockConnection(acquired)
+
+    async def connect(self):
+        self.connection.events.append("connect")
+        return self.connection
+
+
+class FakeLockConnection:
+    def __init__(self, acquired):
+        self.acquired = acquired
+        self.events = []
+        self.closed = False
+
+    async def scalar(self, statement, params):
+        self.events.append(("scalar", str(statement), params["key"]))
+        return self.acquired
+
+    async def execute(self, statement, params):
+        self.events.append(("execute", str(statement), params["key"]))
+
+    async def commit(self):
+        self.events.append("commit")
+
+    async def close(self):
+        self.closed = True
+        self.events.append("close")
+
+
+async def test_postgresql_advisory_lock_commits_and_closes():
+    fake_engine = FakeLockEngine(acquired=True)
+    settings = Settings(database_url="postgresql://u:p@localhost/db")
+
+    async with JobLock("recent", settings=settings, lock_engine=fake_engine) as lock:
+        assert lock.acquired
+        assert fake_engine.connection.events[:3] == ["connect", fake_engine.connection.events[1], "commit"]
+        assert fake_engine.connection.closed is False
+
+    events = fake_engine.connection.events
+    assert "pg_try_advisory_lock" in events[1][1]
+    assert "pg_advisory_unlock" in events[-3][1]
+    assert events[-2:] == ["commit", "close"]
+
+
+async def test_postgresql_advisory_lock_failed_acquisition_closes():
+    fake_engine = FakeLockEngine(acquired=False)
+    settings = Settings(database_url="postgresql://u:p@localhost/db")
+
+    async with JobLock("recent", settings=settings, lock_engine=fake_engine) as lock:
+        assert not lock.acquired
+
+    assert fake_engine.connection.events[-1] == "close"
+    assert not any(
+        isinstance(event, tuple) and "pg_advisory_unlock" in event[1]
+        for event in fake_engine.connection.events
+    )
+
+
+async def test_postgresql_advisory_lock_exception_still_releases_and_closes():
+    fake_engine = FakeLockEngine(acquired=True)
+    settings = Settings(database_url="postgresql://u:p@localhost/db")
+
+    with pytest.raises(RuntimeError):
+        async with JobLock("recent", settings=settings, lock_engine=fake_engine):
+            raise RuntimeError("job failed")
+
+    assert fake_engine.connection.events[-1] == "close"
+    assert any(
+        isinstance(event, tuple) and "pg_advisory_unlock" in event[1]
+        for event in fake_engine.connection.events
+    )

@@ -64,17 +64,17 @@ class Worker:
         self._install_signal_handlers()
         outcomes: list[JobRunOutcome] = []
         while not self.stop_event.is_set():
-            jobs = enabled_jobs(self.settings)
-            loop_outcomes = await self.run_due_jobs(jobs)
-            outcomes.extend(loop_outcomes)
+            try:
+                jobs = enabled_jobs(self.settings)
+                loop_outcomes = await self.run_due_jobs(jobs)
+                outcomes.extend(loop_outcomes)
+            except Exception:
+                logger.exception("worker scheduler scan failed")
+                if once:
+                    raise
             if once:
                 return outcomes
-            try:
-                await asyncio.wait_for(
-                    self.stop_event.wait(), timeout=self.settings.worker_poll_seconds
-                )
-            except TimeoutError:
-                continue
+            await self._wait_for_next_poll()
         logger.info("worker_stopping")
         return outcomes
 
@@ -82,9 +82,8 @@ class Worker:
         outcomes = []
         for job in jobs:
             async with self.session_factory() as session:
-                async with session.begin():
-                    state = await ensure_job_state(session, job)
-                    due = is_due(state)
+                state = await get_job_state(session, job.name)
+                due = state is None or is_due(state)
             if not due:
                 continue
             outcomes.append(await self.run_job(job, only_if_due=True))
@@ -147,6 +146,17 @@ class Worker:
                 loop.add_signal_handler(sig, self.request_stop)
         except (NotImplementedError, RuntimeError):
             return
+
+    async def _wait_for_next_poll(self) -> None:
+        if self.sleep is asyncio.sleep:
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=self.settings.worker_poll_seconds
+                )
+            except TimeoutError:
+                return
+        else:
+            await self.sleep(self.settings.worker_poll_seconds)
 
 
 async def list_job_rows(

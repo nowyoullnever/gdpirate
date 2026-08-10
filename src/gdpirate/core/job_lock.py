@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
+import logging
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.database import engine
 
+logger = logging.getLogger(__name__)
 _sqlite_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -25,23 +27,24 @@ class JobLock:
         *,
         settings: Settings | None = None,
         session_factory: async_sessionmaker | None = None,
+        lock_engine=None,
     ) -> None:
         self.job_name = job_name
         self.settings = settings or get_settings()
         self.session_factory = session_factory
+        self.lock_engine = lock_engine or engine
         self._sqlite_lock: asyncio.Lock | None = None
         self._connection = None
         self.acquired = False
 
     async def __aenter__(self) -> "JobLock":
         if self.settings.async_database_url.startswith("postgresql+asyncpg://"):
-            self._connection = await engine.connect()
-            acquired = (
-                await self._connection.execute(
-                    text("SELECT pg_try_advisory_lock(:key)"),
-                    {"key": advisory_lock_key(self.job_name)},
-                )
-            ).scalar_one()
+            self._connection = await self.lock_engine.connect()
+            acquired = await self._connection.scalar(
+                text("SELECT pg_try_advisory_lock(:key)"),
+                {"key": advisory_lock_key(self.job_name)},
+            )
+            await self._connection.commit()
             self.acquired = bool(acquired)
             if not self.acquired:
                 await self._connection.close()
@@ -60,12 +63,23 @@ class JobLock:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._connection is not None:
             try:
-                await self._connection.execute(
-                    text("SELECT pg_advisory_unlock(:key)"),
-                    {"key": advisory_lock_key(self.job_name)},
-                )
+                try:
+                    await self._connection.execute(
+                        text("SELECT pg_advisory_unlock(:key)"),
+                        {"key": advisory_lock_key(self.job_name)},
+                    )
+                    await self._connection.commit()
+                except Exception:
+                    logger.exception("job lock cleanup failed", extra={"job": self.job_name})
+                    if exc_type is None:
+                        raise
             finally:
-                await self._connection.close()
+                try:
+                    await self._connection.close()
+                except Exception:
+                    logger.exception("job lock connection close failed", extra={"job": self.job_name})
+                    if exc_type is None:
+                        raise
         if self._sqlite_lock is not None and self._sqlite_lock.locked():
             self._sqlite_lock.release()
 
