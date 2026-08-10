@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     lemmy_instances: str = "https://lemmy.world,https://lemmy.ml"
     misskey_instances: str = "https://misskey.io"
     feed_config_path: str = "./config/feeds.toml"
+    fediverse_instance_config_path: str = "./config/fediverse_instances.toml"
+    fediverse_local_only: bool = True
+    nostr_relays: str = "wss://nos.lol,wss://relay.primal.net"
+    nostr_viewer_base: str = "https://njump.me"
     enable_gdurl: bool = False
     enable_dedigger: bool = False
     enable_common_crawl: bool = False
@@ -49,6 +53,10 @@ class Settings(BaseSettings):
     @property
     def misskey_instance_list(self) -> list[str]:
         return _split_csv_urls(self.misskey_instances)
+
+    @property
+    def nostr_relay_list(self) -> list[str]:
+        return _split_csv_urls(self.nostr_relays)
 
 
 @lru_cache

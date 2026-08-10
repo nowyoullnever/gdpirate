@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 from pathlib import Path
+import json
 import tomllib
 from xml.etree import ElementTree
 
@@ -21,16 +24,34 @@ class FeedCollector:
     ) -> AsyncIterator[CandidateLink]:
         emitted = 0
         for feed in _load_feed_config(self.settings.feed_config_path):
-            if not feed.get("enabled", True):
-                continue
             feed_url = str(feed["url"])
-            response = await request_with_retries(context.client, "GET", feed_url)
+            scope = feed_url
+            state = context.get_cursor(scope)
+            headers = {}
+            if state.get("etag"):
+                headers["If-None-Match"] = state["etag"]
+            if state.get("last_modified"):
+                headers["If-Modified-Since"] = state["last_modified"]
+            response = await request_with_retries(
+                context.client, "GET", feed_url, headers=headers
+            )
+            if response.status_code == 304:
+                await context.checkpoint(scope, state)
+                continue
             if response.status_code >= 400:
                 context.error = f"feed failed: {feed_url} {response.status_code}"
                 continue
-            for entry in _parse_feed_entries(response.text, feed_url):
-                source_url = entry["source_url"] or feed_url
-                for raw_url in extract_google_urls(entry["text"]):
+            entries = _parse_feed_entries(
+                response.text,
+                response.headers.get("Content-Type", ""),
+            )
+            for entry in entries:
+                if max_items is not None and context.scanned >= max_items:
+                    await context.checkpoint(scope, _feed_state(response, entry))
+                    return
+                context.mark_scanned()
+                source_url = entry.source_url or feed_url
+                for raw_url in extract_google_urls(entry.text):
                     yield CandidateLink(
                         raw_url=raw_url,
                         source_name=str(feed.get("name") or self.source_name),
@@ -38,7 +59,34 @@ class FeedCollector:
                     )
                     emitted += 1
                     if max_items is not None and emitted >= max_items:
+                        await context.checkpoint(scope, _feed_state(response, entry))
                         return
+            latest = entries[0] if entries else None
+            await context.checkpoint(scope, _feed_state(response, latest))
+
+
+class FeedEntry:
+    def __init__(
+        self,
+        *,
+        source_url: str | None,
+        text: str,
+        entry_id: str | None = None,
+        timestamp: str | None = None,
+    ) -> None:
+        self.source_url = source_url
+        self.text = text
+        self.entry_id = entry_id
+        self.timestamp = timestamp
+
+
+def _feed_state(response, entry: FeedEntry | None) -> dict:
+    return {
+        "etag": response.headers.get("ETag"),
+        "last_modified": response.headers.get("Last-Modified"),
+        "latest_entry_id": entry.entry_id if entry else None,
+        "latest_entry_timestamp": entry.timestamp if entry else None,
+    }
 
 
 def _load_feed_config(path: str) -> list[dict]:
@@ -47,48 +95,113 @@ def _load_feed_config(path: str) -> list[dict]:
         return []
     with config_path.open("rb") as handle:
         payload = tomllib.load(handle)
-    return [feed for feed in payload.get("feeds", []) if feed.get("url")]
+    feeds = [feed for feed in payload.get("feeds", []) if feed.get("url")]
+    feeds.extend(
+        {
+            "name": "Micro.blog",
+            "url": f"https://{user['username']}.micro.blog/feed.xml",
+            "enabled": user.get("enabled", True),
+        }
+        for user in payload.get("microblog_users", [])
+        if user.get("username")
+    )
+    feeds.extend(
+        {
+            "name": "WriteFreely",
+            "url": _writefreely_feed_url(blog["url"]),
+            "enabled": blog.get("enabled", True),
+        }
+        for blog in payload.get("writefreely_blogs", [])
+        if blog.get("url")
+    )
+    return [feed for feed in feeds if feed.get("enabled", True)]
 
 
-def _parse_feed_entries(xml_text: str, feed_url: str) -> list[dict[str, str | None]]:
+def _writefreely_feed_url(url: str) -> str:
+    return f"{url.rstrip('/')}/feed/"
+
+
+def _parse_feed_entries(text: str, content_type: str = "") -> list[FeedEntry]:
+    stripped = text.lstrip()
+    if "json" in content_type.lower() or stripped.startswith("{"):
+        return _parse_json_feed(text)
     try:
-        root = ElementTree.fromstring(xml_text)
+        root = ElementTree.fromstring(text)
     except ElementTree.ParseError:
         return []
 
-    entries: list[dict[str, str | None]] = []
     if _strip_ns(root.tag) == "rss" or root.find("./channel") is not None:
-        for item in root.findall(".//item"):
-            entries.append(_rss_item(item))
-    elif _strip_ns(root.tag) == "feed":
-        for entry in root.findall("{*}entry"):
-            entries.append(_atom_entry(entry))
+        return [_rss_item(item) for item in root.findall(".//item")]
+    if _strip_ns(root.tag) == "feed":
+        return [_atom_entry(entry) for entry in root.findall("{*}entry")]
+    return []
+
+
+def _parse_json_feed(text: str) -> list[FeedEntry]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    entries = []
+    for item in payload.get("items", []):
+        source_url = item.get("url") or item.get("external_url")
+        parts = [
+            item.get("title"),
+            item.get("summary"),
+            item.get("content_text"),
+            item.get("content_html"),
+            source_url,
+        ]
+        entries.append(
+            FeedEntry(
+                source_url=source_url,
+                text=" ".join(str(part or "") for part in parts),
+                entry_id=item.get("id"),
+                timestamp=item.get("date_published") or item.get("date_modified"),
+            )
+        )
     return entries
 
 
-def _rss_item(item: ElementTree.Element) -> dict[str, str | None]:
+def _rss_item(item: ElementTree.Element) -> FeedEntry:
     link = _child_text(item, "link")
+    entry_id = _child_text(item, "guid") or link
+    timestamp = _child_text(item, "pubDate")
     parts = [
         _child_text(item, "title"),
         _child_text(item, "description"),
         _child_text(item, "summary"),
         _child_text(item, "content"),
+        link,
     ]
-    return {"source_url": link, "text": " ".join(part or "" for part in parts + [link])}
+    return FeedEntry(
+        source_url=link,
+        text=" ".join(part or "" for part in parts),
+        entry_id=entry_id,
+        timestamp=timestamp,
+    )
 
 
-def _atom_entry(entry: ElementTree.Element) -> dict[str, str | None]:
+def _atom_entry(entry: ElementTree.Element) -> FeedEntry:
     link = None
     for link_node in entry.findall("{*}link"):
-        if link_node.get("href"):
+        if link_node.get("rel") in {None, "alternate"} and link_node.get("href"):
             link = link_node.get("href")
             break
+    entry_id = _child_text(entry, "id") or link
+    timestamp = _child_text(entry, "updated") or _child_text(entry, "published")
     parts = [
         _child_text(entry, "title"),
         _child_text(entry, "summary"),
         _child_text(entry, "content"),
+        link,
     ]
-    return {"source_url": link, "text": " ".join(part or "" for part in parts + [link])}
+    return FeedEntry(
+        source_url=link,
+        text=" ".join(part or "" for part in parts),
+        entry_id=entry_id,
+        timestamp=timestamp,
+    )
 
 
 def _child_text(node: ElementTree.Element, name: str) -> str | None:

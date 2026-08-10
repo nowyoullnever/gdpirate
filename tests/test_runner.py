@@ -28,9 +28,10 @@ class FakeCollector:
         for url in self.urls:
             if max_items is not None and count >= max_items:
                 return
+            context.mark_scanned()
             yield CandidateLink(raw_url=url, source_name=self.name)
             count += 1
-        context.set_cursor("scope", {"done": True})
+        await context.checkpoint("scope", {"done": True})
 
 
 @pytest.fixture
@@ -62,7 +63,8 @@ async def test_runner_collect_one_persists_state_and_ingests(runner_session_fact
         links = (await session.execute(select(DriveLink))).scalars().all()
         states = (await session.execute(select(CollectorState))).scalars().all()
     assert len(links) == 1
-    assert states[0].cursor_json == {"scope": {"done": True}}
+    by_scope = {state.scope: state.cursor_json for state in states}
+    assert by_scope["scope"] == {"done": True}
 
 
 @respx.mock

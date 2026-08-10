@@ -185,3 +185,32 @@ async def test_invalid_candidate_is_not_stored(session):
 
     assert result.valid is False
     assert await count_drive_links(session) == 0
+
+
+async def test_concurrent_duplicate_ingestion_keeps_one_row(tmp_path):
+    db_path = tmp_path / "concurrent.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def ingest_once():
+        async with maker() as session:
+            async with session.begin():
+                service = IngestionService(
+                    session, StaticAccessChecker(), check_access=False
+                )
+                return await service.ingest(
+                    CandidateLink(
+                        raw_url="https://drive.google.com/file/d/ABC123/view",
+                        source_name="manual",
+                    )
+                )
+
+    results = await __import__("asyncio").gather(*(ingest_once() for _ in range(10)))
+
+    async with maker() as session:
+        assert await count_drive_links(session) == 1
+    assert sum(result.created for result in results) == 1
+    assert sum(result.duplicate for result in results) == 9
+    await engine.dispose()

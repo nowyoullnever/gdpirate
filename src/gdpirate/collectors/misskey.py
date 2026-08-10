@@ -40,6 +40,10 @@ class MisskeyCollector:
                     if not notes:
                         break
                     for note in notes:
+                        if max_items is not None and context.scanned >= max_items:
+                            await context.checkpoint(scope, {"offset": offset})
+                            return
+                        context.mark_scanned()
                         source_url = _misskey_source_url(instance, note)
                         text = " ".join(
                             str(note.get(key) or "") for key in ("text", "url", "uri")
@@ -52,10 +56,10 @@ class MisskeyCollector:
                             )
                             emitted += 1
                             if max_items is not None and emitted >= max_items:
-                                context.set_cursor(scope, {"offset": offset})
+                                await context.checkpoint(scope, {"offset": offset})
                                 return
                     offset += len(notes)
-                    context.set_cursor(scope, {"offset": offset})
+                    await context.checkpoint(scope, {"offset": offset})
 
 
 def _misskey_source_url(instance: str, note: dict) -> str | None:

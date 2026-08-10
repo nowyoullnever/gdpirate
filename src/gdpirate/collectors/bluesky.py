@@ -22,7 +22,9 @@ class BlueskyCollector:
         endpoint = f"{self.settings.bluesky_api_base.rstrip('/')}/xrpc/app.bsky.feed.searchPosts"
         for term in DISCOVERY_TERMS:
             scope = f"search/{term}"
-            cursor = context.get_cursor(scope).get("cursor")
+            state = context.get_cursor(scope)
+            cursor = state.get("cursor")
+            offset = int(state.get("offset", 0))
             while max_items is None or emitted < max_items:
                 response = await request_with_retries(
                     context.client,
@@ -42,7 +44,13 @@ class BlueskyCollector:
                 posts = payload.get("posts") or []
                 if not posts:
                     break
-                for post in posts:
+                for index, post in enumerate(posts[offset:], start=offset):
+                    if max_items is not None and context.scanned >= max_items:
+                        await context.checkpoint(
+                            scope, {"cursor": cursor, "offset": index}
+                        )
+                        return
+                    context.mark_scanned()
                     source_url = _bsky_source_url(post)
                     for raw_url in _post_urls(post):
                         yield CandidateLink(
@@ -52,10 +60,13 @@ class BlueskyCollector:
                         )
                         emitted += 1
                         if max_items is not None and emitted >= max_items:
-                            context.set_cursor(scope, {"cursor": payload.get("cursor")})
+                            await context.checkpoint(
+                                scope, {"cursor": cursor, "offset": index + 1}
+                            )
                             return
                 cursor = payload.get("cursor")
-                context.set_cursor(scope, {"cursor": cursor})
+                offset = 0
+                await context.checkpoint(scope, {"cursor": cursor, "offset": 0})
                 if not cursor:
                     break
 

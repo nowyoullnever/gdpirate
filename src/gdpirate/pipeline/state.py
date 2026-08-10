@@ -13,6 +13,17 @@ async def load_collector_cursor(
     return state.cursor_json or {} if state else {}
 
 
+async def load_collector_cursors(session: AsyncSession, collector_name: str) -> dict:
+    result = await session.execute(
+        select(CollectorState).where(CollectorState.collector_name == collector_name)
+    )
+    return {
+        state.scope: state.cursor_json or {}
+        for state in result.scalars().all()
+        if state.scope != "default"
+    }
+
+
 async def get_collector_state(
     session: AsyncSession, collector_name: str, scope: str
 ) -> CollectorState | None:

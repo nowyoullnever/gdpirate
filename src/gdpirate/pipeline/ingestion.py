@@ -1,8 +1,11 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
+import asyncio
+from collections import defaultdict
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gdpirate.collectors.base import CandidateLink
@@ -25,11 +28,14 @@ class IngestionResult:
     duplicate: bool = False
     access_status: AccessStatus = AccessStatus.UNKNOWN
     canonical_url: str | None = None
+    provider: str | None = None
     resource_id: str | None = None
     message: str | None = None
+    access_check_needed: bool = False
 
 
 class IngestionService:
+    _locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
     def __init__(
         self,
         session: AsyncSession,
@@ -48,6 +54,12 @@ class IngestionService:
         if not parsed:
             return IngestionResult(valid=False, message="invalid_google_url")
 
+        async with self._locks[(parsed.provider, parsed.resource_id)]:
+            return await self._ingest_locked(candidate, parsed)
+
+    async def _ingest_locked(
+        self, candidate: CandidateLink, parsed: ParsedGoogleUrl
+    ) -> IngestionResult:
         existing = await self._find_existing(parsed)
         created = existing is None
         link = existing or DriveLink(
@@ -83,15 +95,48 @@ class IngestionService:
             link.access_status = await self.access_checker.check(link.canonical_url)
             link.last_checked_at = datetime.now(UTC)
 
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError:
+            await self.session.rollback()
+            existing = await self._find_existing(parsed)
+            if existing is None:
+                raise
+            return IngestionResult(
+                valid=True,
+                created=False,
+                duplicate=True,
+                access_status=existing.access_status,
+                canonical_url=existing.canonical_url,
+                provider=existing.provider,
+                resource_id=existing.resource_id,
+                access_check_needed=self._should_check_access(existing, False),
+            )
         return IngestionResult(
             valid=True,
             created=created,
             duplicate=not created,
             access_status=link.access_status,
             canonical_url=link.canonical_url,
+            provider=link.provider,
             resource_id=link.resource_id,
+            access_check_needed=self._should_check_access(link, created),
         )
+
+    async def update_access_status(
+        self, provider: str, resource_id: str, status: AccessStatus
+    ) -> None:
+        result = await self.session.execute(
+            select(DriveLink).where(
+                DriveLink.provider == provider,
+                DriveLink.resource_id == resource_id,
+            )
+        )
+        link = result.scalar_one_or_none()
+        if link is not None:
+            link.access_status = status
+            link.last_checked_at = datetime.now(UTC)
+            await self.session.flush()
 
     def _should_check_access(self, link: DriveLink, created: bool) -> bool:
         if created or link.last_checked_at is None:

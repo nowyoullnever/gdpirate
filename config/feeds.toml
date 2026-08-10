@@ -2,3 +2,31 @@
 name = "Example"
 url = "https://example.com/feed.xml"
 enabled = false
+
+[[feeds]]
+name = "SpaceHey Recent Blogs"
+url = "https://rss.spacehey.com/blog_recent"
+enabled = true
+
+[[feeds]]
+name = "SpaceHey Top Blogs"
+url = "https://rss.spacehey.com/blog_top"
+enabled = true
+
+[[feeds]]
+name = "SpaceHey Recent Layouts"
+url = "https://rss.spacehey.com/layouts_recent"
+enabled = true
+
+[[feeds]]
+name = "SpaceHey Top Layouts"
+url = "https://rss.spacehey.com/layouts_top"
+enabled = true
+
+[[microblog_users]]
+username = "example"
+enabled = false
+
+[[writefreely_blogs]]
+url = "https://example.writefreely-instance.example/blog"
+enabled = false

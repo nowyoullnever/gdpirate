@@ -52,6 +52,9 @@ uv run gdpirate stats
 uv run gdpirate sources
 uv run gdpirate collect hackernews --max-items 10
 uv run gdpirate collect all --max-items-per-source 10
+uv run gdpirate collect fediverse --max-items 20
+uv run gdpirate collect nostr --max-items 20
+uv run gdpirate live-access-check
 ```
 
 ## Tests
@@ -65,7 +68,7 @@ The normal test suite uses mocked HTTP responses for access checks. Optional liv
 ## Architecture
 
 Future collectors emit `CandidateLink` objects and call the central ingestion service. Collectors do not parse Google URLs and do not talk to SQLAlchemy directly.
-The first collector set discovers links from Hacker News, anonymous Bluesky search when available, Lemmy, Misskey, and configured RSS/Atom feeds.
+The collector set discovers links from Hacker News, anonymous Bluesky search when available, Lemmy, Misskey, configured RSS/Atom/JSON feeds, Mastodon-compatible Fediverse public timelines, and read-only Nostr relay windows.
 
 The URL parser accepts known Google Drive, Docs, Sheets, Slides, Forms, and Drawings URL shapes, extracts a stable Google resource identity, and produces deterministic canonical URLs. Lookalike domains are rejected.
 
@@ -73,3 +76,15 @@ Deduplication is based on the actual Google resource identity through a unique `
 
 Anonymous access checking uses `httpx.AsyncClient` without Google cookies, OAuth, browser state, or stored credentials. Uncertain results fail closed to `UNKNOWN`, not `PUBLIC`.
 Access checks use bounded streaming and only inspect up to the configured body byte limit.
+
+Optional live access calibration uses environment-provided URLs only:
+
+```env
+GDPIRATE_LIVE_PUBLIC_URL=
+GDPIRATE_LIVE_RESTRICTED_URL=
+GDPIRATE_LIVE_DEAD_URL=
+```
+
+Run `uv run gdpirate live-access-check` after setting one or more values.
+
+Fediverse instances live in `config/fediverse_instances.toml`. Feed seeds live in `config/feeds.toml`, including SpaceHey feed seeds plus disabled examples for Micro.blog and WriteFreely.

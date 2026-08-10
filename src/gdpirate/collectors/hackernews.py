@@ -35,7 +35,12 @@ class HackerNewsCollector:
                     hits = payload.get("hits") or []
                     if not hits:
                         break
-                    for hit in hits:
+                    offset = int(context.get_cursor(scope).get("offset", 0))
+                    for index, hit in enumerate(hits[offset:], start=offset):
+                        if max_items is not None and context.scanned >= max_items:
+                            await context.checkpoint(scope, {"page": page, "offset": index})
+                            return
+                        context.mark_scanned()
                         source_url = _hn_source_url(hit)
                         text = " ".join(
                             str(hit.get(key) or "")
@@ -49,10 +54,12 @@ class HackerNewsCollector:
                             )
                             emitted += 1
                             if max_items is not None and emitted >= max_items:
-                                context.set_cursor(scope, {"page": page})
+                                await context.checkpoint(
+                                    scope, {"page": page, "offset": index}
+                                )
                                 return
                     page += 1
-                    context.set_cursor(scope, {"page": page})
+                    await context.checkpoint(scope, {"page": page, "offset": 0})
 
 
 def _hn_source_url(hit: dict) -> str | None:

@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -24,12 +24,22 @@ class Collector(Protocol):
 class CollectorContext:
     client: object
     cursor: dict = field(default_factory=dict)
+    checkpoint_callback: Callable[[str, dict], Awaitable[None]] | None = None
     unavailable: bool = False
     error: str | None = None
+    scanned: int = 0
 
     def set_cursor(self, scope: str, value: dict) -> None:
         self.cursor[scope] = value
 
+    async def checkpoint(self, scope: str, value: dict) -> None:
+        self.set_cursor(scope, value)
+        if self.checkpoint_callback is not None:
+            await self.checkpoint_callback(scope, value)
+
     def get_cursor(self, scope: str) -> dict:
         value = self.cursor.get(scope)
         return value if isinstance(value, dict) else {}
+
+    def mark_scanned(self, count: int = 1) -> None:
+        self.scanned += count

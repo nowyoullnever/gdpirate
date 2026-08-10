@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 import typer
@@ -118,6 +119,27 @@ def collect(
                 f"unavailable={str(result.unavailable).lower()} "
                 f"error={result.error or ''}"
             )
+
+    asyncio.run(run())
+
+
+@app.command("live-access-check")
+def live_access_check() -> None:
+    """Opt-in live access calibration using GDPIRATE_LIVE_* environment URLs."""
+
+    async def run() -> None:
+        checker = AccessChecker()
+        for name, env_name in {
+            "PUBLIC": "GDPIRATE_LIVE_PUBLIC_URL",
+            "RESTRICTED": "GDPIRATE_LIVE_RESTRICTED_URL",
+            "DEAD": "GDPIRATE_LIVE_DEAD_URL",
+        }.items():
+            url = os.environ.get(env_name)
+            if not url:
+                typer.echo(f"{name}: skipped")
+                continue
+            status = await checker.check(url)
+            typer.echo(f"{name}: {status.value}")
 
     asyncio.run(run())
 

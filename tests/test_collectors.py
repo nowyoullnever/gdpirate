@@ -215,3 +215,79 @@ async def test_feed_collector_rss_and_atom(tmp_path):
     assert [item.source_name for item in items] == ["RSS", "Atom"]
     assert items[0].source_url == "https://example.com/a"
     assert items[1].source_url == "https://example.com/b"
+
+
+async def test_feed_conditional_request_and_json_feed(tmp_path):
+    config = tmp_path / "feeds.toml"
+    config.write_text(
+        """
+        [[feeds]]
+        name = "JSON"
+        url = "https://feeds.example/json"
+        enabled = true
+        """,
+        encoding="utf-8",
+    )
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.headers.get("If-None-Match") == '"abc"':
+            return httpx.Response(304)
+        return httpx.Response(
+            200,
+            headers={"ETag": '"abc"', "Last-Modified": "Mon, 10 Aug 2026 00:00:00 GMT"},
+            json={
+                "items": [
+                    {
+                        "id": "1",
+                        "url": "https://example.com/j",
+                        "content_text": "https://drive.google.com/file/d/ABC123/view",
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        context = CollectorContext(client=client, cursor={})
+        items = [
+            item
+            async for item in FeedCollector(Settings(feed_config_path=str(config))).collect(
+                context
+            )
+        ]
+        context2 = CollectorContext(client=client, cursor=context.cursor)
+        items2 = [
+            item
+            async for item in FeedCollector(Settings(feed_config_path=str(config))).collect(
+                context2
+            )
+        ]
+
+    assert len(items) == 1
+    assert items2 == []
+    assert requests[1].headers["If-None-Match"] == '"abc"'
+
+
+def test_feed_platform_config_expands_microblog_and_writefreely(tmp_path):
+    from gdpirate.collectors.feeds import _load_feed_config
+
+    config = tmp_path / "feeds.toml"
+    config.write_text(
+        """
+        [[microblog_users]]
+        username = "alice"
+        enabled = true
+
+        [[writefreely_blogs]]
+        url = "https://write.example/alice"
+        enabled = true
+        """,
+        encoding="utf-8",
+    )
+
+    feeds = _load_feed_config(str(config))
+
+    assert {"name": "Micro.blog", "url": "https://alice.micro.blog/feed.xml", "enabled": True} in feeds
+    assert {"name": "WriteFreely", "url": "https://write.example/alice/feed/", "enabled": True} in feeds

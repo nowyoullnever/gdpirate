@@ -8,16 +8,18 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from gdpirate.collectors.base import CandidateLink, Collector, CollectorContext
 from gdpirate.collectors.bluesky import BlueskyCollector
 from gdpirate.collectors.feeds import FeedCollector
+from gdpirate.collectors.fediverse import FediverseCollector
 from gdpirate.collectors.hackernews import HackerNewsCollector
 from gdpirate.collectors.lemmy import LemmyCollector
 from gdpirate.collectors.misskey import MisskeyCollector
+from gdpirate.collectors.nostr import NostrCollector
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.database import SessionLocal
 from gdpirate.core.http import HttpClientFactory
 from gdpirate.pipeline.ingestion import IngestionService
 from gdpirate.pipeline.state import (
-    load_collector_cursor,
+    load_collector_cursors,
     record_collector_attempt,
     record_collector_error,
     record_collector_success,
@@ -47,6 +49,8 @@ def build_collectors(settings: Settings | None = None) -> dict[str, Collector]:
         "lemmy": LemmyCollector(settings),
         "misskey": MisskeyCollector(settings),
         "feeds": FeedCollector(settings),
+        "fediverse": FediverseCollector(settings),
+        "nostr": NostrCollector(settings),
     }
 
 
@@ -57,6 +61,8 @@ def source_statuses(settings: Settings | None = None) -> dict[str, str]:
         "lemmy": "enabled",
         "misskey": "enabled",
         "feeds": "enabled",
+        "fediverse": "enabled",
+        "nostr": "enabled",
         "gdurl": "enabled" if (settings or get_settings()).enable_gdurl else "disabled",
         "dedigger": "enabled"
         if (settings or get_settings()).enable_dedigger
@@ -105,11 +111,18 @@ class CollectionRunner:
         async with self.session_factory() as session:
             async with session.begin():
                 await record_collector_attempt(session, source)
-                cursor = await load_collector_cursor(session, source)
+                cursor = await load_collector_cursors(session, source)
 
         factory = HttpClientFactory(self.settings)
         async with factory.client() as client:
-            context = CollectorContext(client=client, cursor=cursor)
+            async def checkpoint(scope: str, value: dict) -> None:
+                async with self.session_factory() as session:
+                    async with session.begin():
+                        await record_collector_success(session, source, scope, value)
+
+            context = CollectorContext(
+                client=client, cursor=cursor, checkpoint_callback=checkpoint
+            )
             queue: asyncio.Queue[CandidateLink | None] = asyncio.Queue(
                 maxsize=self.settings.http_max_concurrency
             )
@@ -121,7 +134,6 @@ class CollectionRunner:
                 async for candidate in self.collectors[source].collect(
                     context, max_items=max_items
                 ):
-                    result.scanned += 1
                     await queue.put(candidate)
             except Exception as exc:
                 result.error = str(exc)
@@ -131,13 +143,14 @@ class CollectionRunner:
                 await asyncio.gather(*workers)
 
         result.unavailable = context.unavailable
+        result.scanned = context.scanned
         result.error = result.error or context.error
         async with self.session_factory() as session:
             async with session.begin():
                 if result.error:
                     await record_collector_error(session, source, "default", result.error)
                 else:
-                    await record_collector_success(session, source, "default", context.cursor)
+                    await record_collector_success(session, source, "default", {})
         return result
 
     async def _ingest_worker(
@@ -157,12 +170,36 @@ class CollectionRunner:
                         session,
                         AccessChecker(self.settings, client),
                         settings=self.settings,
+                        check_access=False,
                     )
                     ingestion = await service.ingest(candidate)
-                    if ingestion.valid:
-                        result.candidates += 1
-                        result.created += int(ingestion.created)
-                        result.duplicates += int(ingestion.duplicate)
-                        field = ingestion.access_status.value.lower()
-                        setattr(result, field, getattr(result, field) + 1)
+            if ingestion.valid and ingestion.access_check_needed:
+                status = await AccessChecker(self.settings, client).check(
+                    ingestion.canonical_url or candidate.raw_url
+                )
+                async with self.session_factory() as session:
+                    async with session.begin():
+                        service = IngestionService(
+                            session,
+                            AccessChecker(self.settings, client),
+                            settings=self.settings,
+                            check_access=False,
+                        )
+                        if ingestion.provider and ingestion.resource_id:
+                            await service.update_access_status(
+                                ingestion.provider, ingestion.resource_id, status
+                            )
+                ingestion = IngestionResultWithStatus(ingestion, status)
+            if ingestion.valid:
+                result.candidates += 1
+                result.created += int(ingestion.created)
+                result.duplicates += int(ingestion.duplicate)
+                field = ingestion.access_status.value.lower()
+                setattr(result, field, getattr(result, field) + 1)
             queue.task_done()
+
+
+class IngestionResultWithStatus:
+    def __init__(self, original, status):
+        self.__dict__.update(original.__dict__)
+        self.access_status = status

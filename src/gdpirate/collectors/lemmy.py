@@ -50,6 +50,10 @@ class LemmyCollector:
                         if not items:
                             break
                         for item in items:
+                            if max_items is not None and context.scanned >= max_items:
+                                await context.checkpoint(scope, {"page": page})
+                                return
+                            context.mark_scanned()
                             source_url = _lemmy_source_url(item, type_name)
                             text = _lemmy_text(item, type_name)
                             for raw_url in extract_google_urls(text):
@@ -60,10 +64,10 @@ class LemmyCollector:
                                 )
                                 emitted += 1
                                 if max_items is not None and emitted >= max_items:
-                                    context.set_cursor(scope, {"page": page})
+                                    await context.checkpoint(scope, {"page": page})
                                     return
                         page += 1
-                        context.set_cursor(scope, {"page": page})
+                        await context.checkpoint(scope, {"page": page})
 
 
 def _lemmy_text(item: dict, type_name: str) -> str:
