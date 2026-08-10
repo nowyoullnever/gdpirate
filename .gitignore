@@ -1,6 +1,11 @@
 .env
 *.db
 *.db-*
+commoncrawl-data/
+*.wat.gz
+*.warc.gz
+*.paths.gz
+*.parquet
 .venv/
 __pycache__/
 .pytest_cache/

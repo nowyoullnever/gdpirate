@@ -20,6 +20,9 @@ from gdpirate.pipeline.ingestion import (
     count_drive_links_by_status,
 )
 from gdpirate.pipeline.validation import validate_links
+from gdpirate.collectors.commoncrawl import fetch_collinfo
+from gdpirate.config import get_settings
+from gdpirate.core.http import HttpClientFactory
 from sqlalchemy import delete, select
 
 app = typer.Typer(no_args_is_help=True)
@@ -106,6 +109,8 @@ def collect(
     source: str,
     max_items: int | None = typer.Option(None, "--max-items"),
     max_items_per_source: int | None = typer.Option(None, "--max-items-per-source"),
+    mode: str | None = typer.Option(None, "--mode"),
+    max_files: int | None = typer.Option(None, "--max-files"),
 ) -> None:
     async def run() -> None:
         runner = CollectionRunner()
@@ -113,6 +118,8 @@ def collect(
             source,
             max_items=max_items,
             max_items_per_source=max_items_per_source,
+            commoncrawl_mode=mode,
+            max_files=max_files,
         )
         for result in results:
             typer.echo(
@@ -123,6 +130,20 @@ def collect(
                 f"unavailable={str(result.unavailable).lower()} "
                 f"error={result.error or ''}"
             )
+
+    asyncio.run(run())
+
+
+@app.command("commoncrawl-crawls")
+def commoncrawl_crawls() -> None:
+    async def run() -> None:
+        settings = get_settings()
+        factory = HttpClientFactory(settings)
+        async with factory.client() as client:
+            for item in await fetch_collinfo(client, settings):
+                crawl_id = item.get("id")
+                if crawl_id:
+                    typer.echo(crawl_id)
 
     asyncio.run(run())
 

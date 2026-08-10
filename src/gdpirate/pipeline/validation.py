@@ -38,7 +38,9 @@ async def validate_links(
     session_factory = session_factory or SessionLocal
     concurrency = max(1, concurrency or settings.http_max_concurrency)
     result = ValidationResult()
-    queue: asyncio.Queue[tuple[str, str, str] | None] = asyncio.Queue(maxsize=concurrency)
+    queue: asyncio.Queue[tuple[int, str, str, str] | None] = asyncio.Queue(
+        maxsize=concurrency
+    )
 
     factory = HttpClientFactory(settings)
     async with factory.client() as client:
@@ -48,18 +50,30 @@ async def validate_links(
             )
             for _ in range(concurrency)
         ]
-        async with session_factory() as session:
-            rows = await _select_validation_rows(
-                session,
-                status=status,
-                source=source,
-                stale_only=stale_only,
-                settings=settings,
-                limit=max_items,
-            )
-        for row in rows:
-            result.selected += 1
-            await queue.put(row)
+        last_id = 0
+        remaining = max_items
+        while remaining is None or remaining > 0:
+            limit = settings.validation_db_batch_size
+            if remaining is not None:
+                limit = min(limit, remaining)
+            async with session_factory() as session:
+                rows = await _select_validation_rows(
+                    session,
+                    status=status,
+                    source=source,
+                    stale_only=stale_only,
+                    settings=settings,
+                    limit=limit,
+                    last_id=last_id,
+                )
+            if not rows:
+                break
+            for row in rows:
+                last_id = row[0]
+                result.selected += 1
+                if remaining is not None:
+                    remaining -= 1
+                await queue.put(row)
         for _ in workers:
             await queue.put(None)
         await asyncio.gather(*workers)
@@ -74,10 +88,11 @@ async def _select_validation_rows(
     stale_only: bool,
     settings: Settings,
     limit: int | None,
-) -> list[tuple[str, str, str]]:
-    stmt = select(DriveLink.provider, DriveLink.resource_id, DriveLink.canonical_url).where(
-        DriveLink.access_status == status
-    )
+    last_id: int,
+) -> list[tuple[int, str, str, str]]:
+    stmt = select(
+        DriveLink.id, DriveLink.provider, DriveLink.resource_id, DriveLink.canonical_url
+    ).where(DriveLink.access_status == status, DriveLink.id > last_id)
     if source:
         stmt = stmt.where(DriveLink.source_name == source)
     if stale_only:
@@ -91,7 +106,10 @@ async def _select_validation_rows(
     if limit is not None:
         stmt = stmt.limit(limit)
     rows = await session.execute(stmt)
-    return [(provider, resource_id, canonical_url) for provider, resource_id, canonical_url in rows]
+    return [
+        (row_id, provider, resource_id, canonical_url)
+        for row_id, provider, resource_id, canonical_url in rows
+    ]
 
 
 async def _validation_worker(
@@ -106,7 +124,7 @@ async def _validation_worker(
         if item is None:
             queue.task_done()
             return
-        provider, resource_id, canonical_url = item
+        _row_id, provider, resource_id, canonical_url = item
         try:
             status = await AccessChecker(settings, client).check(canonical_url)
             async with session_factory() as session:

@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     dedigger_query_config_path: str = "./config/dedigger_queries.toml"
     dedigger_request_delay_seconds: float = 2.0
     dedigger_max_concurrency: int = 1
+    validation_db_batch_size: int = 500
+    commoncrawl_collinfo_url: str = "https://index.commoncrawl.org/collinfo.json"
+    commoncrawl_data_base: str = "https://data.commoncrawl.org"
+    commoncrawl_crawls: str = "latest"
+    commoncrawl_default_mode: str = "url-index"
+    commoncrawl_wat_concurrency: int = 1
+    commoncrawl_checkpoint_record_interval: int = 5000
+    commoncrawl_temp_dir: str = "./commoncrawl-data"
     enable_gdurl: bool = False
     enable_dedigger: bool = False
     enable_common_crawl: bool = False
@@ -65,6 +73,10 @@ class Settings(BaseSettings):
     @property
     def nostr_relay_list(self) -> list[str]:
         return _split_csv_urls(self.nostr_relays)
+
+    @property
+    def commoncrawl_crawl_list(self) -> list[str]:
+        return [item.strip() for item in self.commoncrawl_crawls.split(",") if item.strip()]
 
 
 @lru_cache

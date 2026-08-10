@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from gdpirate.collectors.base import CandidateLink, Collector, CollectorContext
 from gdpirate.collectors.bluesky import BlueskyCollector
+from gdpirate.collectors.commoncrawl import CommonCrawlCollector
 from gdpirate.collectors.dedigger import DeDiggerCollector
 from gdpirate.collectors.feeds import FeedCollector
 from gdpirate.collectors.fediverse import FediverseCollector
@@ -55,6 +56,7 @@ def build_collectors(settings: Settings | None = None) -> dict[str, Collector]:
         "nostr": NostrCollector(settings),
         "gdurl": GdUrlCollector(settings),
         "dedigger": DeDiggerCollector(settings),
+        "commoncrawl": CommonCrawlCollector(settings),
     }
 
 
@@ -93,7 +95,16 @@ class CollectionRunner:
         *,
         max_items: int | None = None,
         max_items_per_source: int | None = None,
+        commoncrawl_mode: str | None = None,
+        max_files: int | None = None,
     ) -> list[CollectionResult]:
+        if source == "commoncrawl" and commoncrawl_mode:
+            from gdpirate.collectors.commoncrawl import CommonCrawlRunOptions
+
+            self.collectors["commoncrawl"] = CommonCrawlCollector(
+                self.settings,
+                CommonCrawlRunOptions(mode=commoncrawl_mode, max_files=max_files),
+            )
         if source == "all":
             results = []
             for name in self.collectors:
@@ -191,7 +202,7 @@ class CollectionRunner:
                     )
                     policy = (
                         AccessCheckPolicy.DEFERRED
-                        if source in {"gdurl", "dedigger"}
+                        if source in {"gdurl", "dedigger", "commoncrawl"}
                         else AccessCheckPolicy.IMMEDIATE
                     )
                     ingestion = await service.ingest_with_policy(candidate, policy)
