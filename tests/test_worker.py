@@ -16,7 +16,7 @@ class FakeExecutor:
         self.failures = set(failures or [])
         self.ran = []
 
-    async def execute(self, job):
+    async def execute(self, job, **kwargs):
         self.ran.append(job.name)
         if job.name in self.failures:
             raise RuntimeError("planned failure")
@@ -24,9 +24,9 @@ class FakeExecutor:
 
 
 class SlowExecutor(FakeExecutor):
-    async def execute(self, job):
+    async def execute(self, job, **kwargs):
         await asyncio.sleep(0.01)
-        return await super().execute(job)
+        return await super().execute(job, **kwargs)
 
 
 async def test_worker_once_runs_due_jobs_and_records_success_failure(tmp_path):
@@ -317,4 +317,40 @@ async def test_worker_survives_scheduler_failure_then_continues(monkeypatch, tmp
 
     assert [outcome.job for outcome in outcomes] == ["good"]
     assert calls["enabled"] >= 2
+    await engine.dispose()
+
+
+async def test_per_job_infrastructure_failure_does_not_block_later_job(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'infra.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    executor = FakeExecutor()
+    calls = {"sessions": 0}
+
+    class FlakySessionFactory:
+        def __call__(self):
+            calls["sessions"] += 1
+            if calls["sessions"] == 1:
+                raise RuntimeError("state lookup failed")
+            return maker()
+
+    worker = Worker(
+        settings=Settings(database_url="sqlite+aiosqlite:///:memory:"),
+        session_factory=FlakySessionFactory(),
+        executor=executor,
+    )
+    jobs = [
+        JobConfig(name="bad_infra", kind="validate", enabled=True, interval_seconds=60),
+        JobConfig(name="good", kind="validate", enabled=True, interval_seconds=60),
+    ]
+
+    outcomes = await worker.run_due_jobs(jobs)
+
+    assert outcomes[0].job == "bad_infra"
+    assert outcomes[0].ran is False
+    assert outcomes[0].error
+    assert outcomes[1].job == "good"
+    assert outcomes[1].ran is True
+    assert executor.ran == ["good"]
     await engine.dispose()

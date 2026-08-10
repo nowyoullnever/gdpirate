@@ -74,7 +74,7 @@ async def test_job_state_success_and_failure_backoff(tmp_path):
 def test_jobs_config_validation(tmp_path):
     path = tmp_path / "jobs.toml"
     path.write_text(
-        '[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\n'
+        '[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\nsources = ["hackernews"]\n'
         '[[jobs]]\nname = "a"\nkind = "validate"\ninterval_seconds = 1\n'
     )
     with pytest.raises(ValueError, match="duplicate"):
@@ -83,6 +83,36 @@ def test_jobs_config_validation(tmp_path):
     path.write_text('[[jobs]]\nname = "a"\nkind = "unknown"\ninterval_seconds = 1\n')
     with pytest.raises(ValueError, match="unknown job kind"):
         load_jobs_config(str(path))
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('[[jobs]]\nname = ""\nkind = "validate"\ninterval_seconds = 1\n', "name"),
+        ('[[jobs]]\nname = "a"\nkind = "validate"\ninterval_seconds = 0\n', "positive"),
+        ('[[jobs]]\nname = "a"\nkind = "validate"\ninterval_seconds = -1\n', "positive"),
+        ('[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\nsources = []\n', "sources"),
+        ('[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\nsources = ["hackernews", "hackernews"]\n', "unique"),
+        ('[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\nsources = ["nope"]\n', "unknown collectors"),
+        ('[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\nsources = ["hackernews"]\nstate_mode = "bad"\n', "bad"),
+        ('[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\nsources = ["feeds"]\nstate_mode = "fresh-head"\n', "fresh-head"),
+        ('[[jobs]]\nname = "a"\nkind = "collect"\ninterval_seconds = 1\nsources = ["hackernews"]\nmax_items_per_source = 0\n', "positive"),
+        ('[[jobs]]\nname = "a"\nkind = "validate"\ninterval_seconds = 1\nstatus = "PUBIC"\n', "invalid validation status"),
+        ('[[jobs]]\nname = "a"\nkind = "validate"\ninterval_seconds = 1\nmax_items = 0\n', "positive"),
+        ('[[jobs]]\nname = "a"\nkind = "validate"\ninterval_seconds = 1\nconcurrency = 0\n', "positive"),
+        ('[[jobs]]\nname = "a"\nkind = "prune_metrics"\ninterval_seconds = 1\nkeep_days = 0\n', "positive"),
+    ],
+)
+def test_invalid_jobs_config_rejected(tmp_path, body, message):
+    path = tmp_path / "jobs.toml"
+    path.write_text(body)
+
+    with pytest.raises(ValueError, match=message):
+        load_jobs_config(str(path))
+
+
+def test_default_jobs_config_loads():
+    assert load_jobs_config("config/jobs.toml")
 
 
 async def test_sqlite_job_lock_prevents_same_process_duplicate():

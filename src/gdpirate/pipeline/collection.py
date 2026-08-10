@@ -1,7 +1,9 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
+import time
 
 import httpx
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -23,6 +25,7 @@ from gdpirate.core.access_check import AccessChecker
 from gdpirate.core.database import SessionLocal
 from gdpirate.core.http import HttpClientFactory
 from gdpirate.pipeline.ingestion import AccessCheckPolicy, IngestionService
+from gdpirate.pipeline.metrics import MetricContext, record_collection_metrics
 from gdpirate.pipeline.state import (
     load_collector_cursors,
     record_collector_attempt,
@@ -57,6 +60,11 @@ class CollectionResult:
     restricted: int = 0
     dead: int = 0
     unknown: int = 0
+    access_checks: int = 0
+    duration_ms: int = 0
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    state_mode: str = "persistent"
     unavailable: bool = False
     error: str | None = None
 
@@ -125,6 +133,7 @@ class CollectionRunner:
         max_files: int | None = None,
         max_records: int | None = None,
         state_mode: str | CollectionStateMode = CollectionStateMode.PERSISTENT,
+        metric_context: MetricContext | None = None,
     ) -> list[CollectionResult]:
         state_mode = CollectionStateMode(state_mode)
         if (
@@ -159,13 +168,35 @@ class CollectionRunner:
                         state_mode=state_mode,
                     )
                 )
+            await record_collection_metrics(
+                results,
+                metric_context=metric_context,
+                session_factory=self.session_factory,
+            )
             return results
         if source not in self.collectors:
             raise ValueError(f"unknown collector: {source}")
         if not self._collector_enabled(source):
             status = source_statuses(self.settings).get(source, "disabled")
-            return [CollectionResult(source=source, error=f"collector {status}")]
-        return [await self._collect_one(source, max_items=max_items, state_mode=state_mode)]
+            results = [CollectionResult(source=source, error=f"collector {status}")]
+            now = datetime.now(UTC)
+            results[0].started_at = now
+            results[0].finished_at = now
+            await record_collection_metrics(
+                results,
+                metric_context=metric_context,
+                session_factory=self.session_factory,
+            )
+            return results
+        results = [
+            await self._collect_one(source, max_items=max_items, state_mode=state_mode)
+        ]
+        await record_collection_metrics(
+            results,
+            metric_context=metric_context,
+            session_factory=self.session_factory,
+        )
+        return results
 
     def _collector_enabled(self, source: str) -> bool:
         if source == "gdurl":
@@ -191,6 +222,9 @@ class CollectionRunner:
         state_mode: CollectionStateMode = CollectionStateMode.PERSISTENT,
     ) -> CollectionResult:
         result = CollectionResult(source=source)
+        result.state_mode = state_mode.value
+        result.started_at = datetime.now(UTC)
+        monotonic_started = time.monotonic()
         if state_mode == CollectionStateMode.PERSISTENT:
             async with self.session_factory() as session:
                 async with session.begin():
@@ -233,6 +267,8 @@ class CollectionRunner:
         result.unavailable = context.unavailable
         result.scanned = context.scanned
         result.error = result.error or context.error
+        result.finished_at = datetime.now(UTC)
+        result.duration_ms = int((time.monotonic() - monotonic_started) * 1000)
         if state_mode == CollectionStateMode.PERSISTENT:
             async with self.session_factory() as session:
                 async with session.begin():
@@ -285,6 +321,7 @@ class CollectionRunner:
                                 ingestion.provider, ingestion.resource_id, status
                             )
                 ingestion = IngestionResultWithStatus(ingestion, status)
+                result.access_checks += 1
             if ingestion.valid:
                 result.candidates += 1
                 result.created += int(ingestion.created)

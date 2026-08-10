@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -22,6 +23,12 @@ from gdpirate.pipeline.ingestion import (
     count_drive_links_by_status,
 )
 from gdpirate.pipeline.validation import validate_links
+from gdpirate.pipeline.metrics import (
+    MetricContext,
+    metrics_summary,
+    prune_metrics,
+    stats_by_source,
+)
 from gdpirate.collectors.commoncrawl import fetch_collinfo
 from gdpirate.config import get_settings
 from gdpirate.core.http import HttpClientFactory
@@ -85,8 +92,23 @@ def ingest_url(
 
 
 @app.command("stats")
-def stats() -> None:
+def stats(
+    by_source: bool = typer.Option(False, "--by-source"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
     async def run() -> None:
+        if by_source:
+            rows = await stats_by_source()
+            if json_output:
+                typer.echo(json.dumps({"by_source": rows}, default=str))
+                return
+            typer.echo("Current stored source\tTotal\tPublic\tRestricted\tDead\tUnknown")
+            for row in rows:
+                typer.echo(
+                    f"{row['source']}\t{row['total']}\t{row['public']}\t"
+                    f"{row['restricted']}\t{row['dead']}\t{row['unknown']}"
+                )
+            return
         async with session_scope() as session:
             total = await count_drive_links(session)
             counts = await count_drive_links_by_status(session)
@@ -127,6 +149,7 @@ def collect(
             max_files=max_files,
             max_records=max_records,
             state_mode="fresh-head" if fresh_head else "persistent",
+            metric_context=MetricContext.create("cli"),
         )
         for result in results:
             typer.echo(
@@ -171,7 +194,17 @@ def worker(once: bool = typer.Option(False, "--once")) -> None:
     configure_logging(settings)
 
     async def run() -> None:
-        await Worker(settings=settings).run(once=once)
+        outcomes = await Worker(settings=settings).run(once=once)
+        if once:
+            for outcome in outcomes:
+                if outcome.error:
+                    typer.echo(f"{outcome.job}: failed {outcome.error}")
+                elif not outcome.ran:
+                    typer.echo(f"{outcome.job}: skipped {outcome.skipped_reason}")
+                else:
+                    typer.echo(f"{outcome.job}: completed")
+            if any(outcome.error for outcome in outcomes):
+                raise typer.Exit(1)
 
     asyncio.run(run())
 
@@ -233,6 +266,7 @@ def validate(
             source=source,
             status=AccessStatus[status.upper()],
             stale_only=stale_only,
+            metric_context=MetricContext.create("cli"),
         )
         typer.echo(f"selected={result.selected}")
         typer.echo(f"checked={result.checked}")
@@ -241,6 +275,63 @@ def validate(
         typer.echo(f"dead={result.dead}")
         typer.echo(f"unknown={result.unknown}")
         typer.echo(f"errors={result.errors}")
+
+    asyncio.run(run())
+
+
+@app.command("metrics")
+def metrics(
+    hours: float = typer.Option(24, "--hours"),
+    source: str | None = typer.Option(None, "--source"),
+    kind: str | None = typer.Option(None, "--kind"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show private operational run telemetry."""
+
+    async def run() -> None:
+        payload = await metrics_summary(hours=hours, source=source, kind=kind)
+        if json_output:
+            typer.echo(json.dumps(payload, default=str))
+            return
+        if kind in {None, "collect"}:
+            typer.echo(f"Collection metrics - last {hours:g}h")
+            typer.echo("Source\tRuns\tScanned\tCandidates\tNew\tDup\tChecks\tPublic\tRestr.\tDead\tUnknown\tErrors\tCandRate\tNewRate\tPublicRate")
+            for row in payload["collection"]:
+                typer.echo(
+                    f"{row['source']}\t{row['runs']}\t{row['scanned']}\t{row['candidates']}\t"
+                    f"{row['created']}\t{row['duplicates']}\t{row['access_checks']}\t"
+                    f"{row['public']}\t{row['restricted']}\t{row['dead']}\t{row['unknown']}\t"
+                    f"{row['errors']}\t{_fmt_rate(row['candidate_rate'])}\t"
+                    f"{_fmt_rate(row['new_rate'])}\t{_fmt_rate(row['resolved_public_rate'])}"
+                )
+        if kind in {None, "validate"}:
+            validation = payload["validation"][0] if payload["validation"] else {}
+            typer.echo(f"Validation metrics - last {hours:g}h")
+            for key in ("runs", "selected", "checked", "public", "restricted", "dead", "unknown", "errors"):
+                typer.echo(f"{key}: {validation.get(key, 0)}")
+            typer.echo(f"public_rate: {_fmt_rate(validation.get('public_rate'))}")
+            by_source = validation.get("by_source") or {}
+            if by_source:
+                typer.echo("Current source\tChecked\tPublic\tRestr.\tDead\tUnknown\tErrors")
+                for source_name, counts in sorted(by_source.items()):
+                    typer.echo(
+                        f"{source_name}\t{counts['checked']}\t{counts['public']}\t"
+                        f"{counts['restricted']}\t{counts['dead']}\t{counts['unknown']}\t{counts['errors']}"
+                    )
+
+    asyncio.run(run())
+
+
+@app.command("metrics-prune")
+def metrics_prune(
+    keep_days: int = typer.Option(90, "--keep-days"),
+) -> None:
+    """Delete old operational metric rows only."""
+
+    async def run() -> None:
+        result = await prune_metrics(keep_days=keep_days)
+        typer.echo(f"collection_deleted={result['collection_deleted']}")
+        typer.echo(f"validation_deleted={result['validation_deleted']}")
 
     asyncio.run(run())
 
@@ -302,6 +393,12 @@ def _alembic_config() -> Config:
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
     return config
+
+
+def _fmt_rate(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.1f}%"
 
 
 if __name__ == "__main__":

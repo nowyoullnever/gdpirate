@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     jobs_config_path: str = "./config/jobs.toml"
     log_level: str = "INFO"
     log_format: str = "text"
+    metrics_retention_days: int = 90
     bluesky_api_base: str = "https://api.bsky.app"
     lemmy_instances: str = "https://lemmy.world,https://lemmy.ml"
     misskey_instances: str = "https://misskey.io"

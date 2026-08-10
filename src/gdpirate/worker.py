@@ -26,6 +26,7 @@ from gdpirate.pipeline.jobs import (
     record_job_started,
     record_job_success,
 )
+from gdpirate.pipeline.metrics import MetricContext
 
 logger = logging.getLogger(__name__)
 
@@ -81,16 +82,24 @@ class Worker:
     async def run_due_jobs(self, jobs: list[JobConfig]) -> list[JobRunOutcome]:
         outcomes = []
         for job in jobs:
-            async with self.session_factory() as session:
-                state = await get_job_state(session, job.name)
-                due = state is None or is_due(state)
-            if not due:
-                continue
-            outcomes.append(await self.run_job(job, only_if_due=True))
+            try:
+                async with self.session_factory() as session:
+                    state = await get_job_state(session, job.name)
+                    due = state is None or is_due(state)
+                if not due:
+                    continue
+                outcomes.append(await self.run_job(job, only_if_due=True))
+            except Exception as exc:
+                logger.exception("job infrastructure failed", extra={"job": job.name})
+                outcomes.append(JobRunOutcome(job.name, ran=False, error=str(exc)))
         return outcomes
 
     async def run_job(
-        self, job: JobConfig, *, only_if_due: bool = False
+        self,
+        job: JobConfig,
+        *,
+        only_if_due: bool = False,
+        trigger: str = "worker",
     ) -> JobRunOutcome:
         async with acquire_job_lock(job.name, settings=self.settings) as lock:
             if not lock.acquired:
@@ -107,7 +116,10 @@ class Worker:
             started = time.monotonic()
             logger.info("job_started", extra={"job": job.name})
             try:
-                result = await self.executor.execute(job)
+                result = await self.executor.execute(
+                    job,
+                    metric_context=MetricContext.create(trigger, job.name),
+                )
             except Exception as exc:
                 async with self.session_factory() as session:
                     async with session.begin():
@@ -137,7 +149,7 @@ class Worker:
         jobs = {job.name: job for job in load_jobs_config(self.settings.jobs_config_path)}
         if name not in jobs:
             raise ValueError(f"unknown job: {name}")
-        return await self.run_job(jobs[name], only_if_due=False)
+        return await self.run_job(jobs[name], only_if_due=False, trigger="run-job")
 
     def _install_signal_handlers(self) -> None:
         try:

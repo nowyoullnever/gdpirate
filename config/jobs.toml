@@ -62,3 +62,10 @@ interval_seconds = 86400
 sources = ["commoncrawl"]
 state_mode = "persistent"
 max_items_per_source = 1000
+
+[[jobs]]
+name = "prune_metrics"
+kind = "prune_metrics"
+enabled = true
+interval_seconds = 86400
+keep_days = 90

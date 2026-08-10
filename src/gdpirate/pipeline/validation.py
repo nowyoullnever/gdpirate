@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import time
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -11,6 +12,7 @@ from gdpirate.core.database import SessionLocal
 from gdpirate.core.http import HttpClientFactory
 from gdpirate.core.models import AccessStatus, DriveLink
 from gdpirate.pipeline.ingestion import IngestionService
+from gdpirate.pipeline.metrics import MetricContext, record_validation_metric
 
 
 @dataclass
@@ -22,6 +24,10 @@ class ValidationResult:
     dead: int = 0
     unknown: int = 0
     errors: int = 0
+    duration_ms: int = 0
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    by_source: dict | None = None
 
 
 async def validate_links(
@@ -33,12 +39,16 @@ async def validate_links(
     stale_only: bool = False,
     settings: Settings | None = None,
     session_factory: async_sessionmaker | None = None,
+    metric_context: MetricContext | None = None,
 ) -> ValidationResult:
     settings = settings or get_settings()
     session_factory = session_factory or SessionLocal
     concurrency = max(1, concurrency or settings.http_max_concurrency)
     result = ValidationResult()
-    queue: asyncio.Queue[tuple[int, str, str, str] | None] = asyncio.Queue(
+    result.started_at = datetime.now(UTC)
+    result.by_source = {}
+    monotonic_started = time.monotonic()
+    queue: asyncio.Queue[tuple[int, str, str, str, str] | None] = asyncio.Queue(
         maxsize=concurrency
     )
 
@@ -77,6 +87,16 @@ async def validate_links(
         for _ in workers:
             await queue.put(None)
         await asyncio.gather(*workers)
+    result.finished_at = datetime.now(UTC)
+    result.duration_ms = int((time.monotonic() - monotonic_started) * 1000)
+    await record_validation_metric(
+        result,
+        metric_context=metric_context,
+        requested_status=status,
+        source_filter=source,
+        stale_only=stale_only,
+        session_factory=session_factory,
+    )
     return result
 
 
@@ -89,9 +109,13 @@ async def _select_validation_rows(
     settings: Settings,
     limit: int | None,
     last_id: int,
-) -> list[tuple[int, str, str, str]]:
+) -> list[tuple[int, str, str, str, str]]:
     stmt = select(
-        DriveLink.id, DriveLink.provider, DriveLink.resource_id, DriveLink.canonical_url
+        DriveLink.id,
+        DriveLink.provider,
+        DriveLink.resource_id,
+        DriveLink.canonical_url,
+        DriveLink.source_name,
     ).where(DriveLink.access_status == status, DriveLink.id > last_id)
     if source:
         stmt = stmt.where(DriveLink.source_name == source)
@@ -107,8 +131,8 @@ async def _select_validation_rows(
         stmt = stmt.limit(limit)
     rows = await session.execute(stmt)
     return [
-        (row_id, provider, resource_id, canonical_url)
-        for row_id, provider, resource_id, canonical_url in rows
+        (row_id, provider, resource_id, canonical_url, source_name)
+        for row_id, provider, resource_id, canonical_url, source_name in rows
     ]
 
 
@@ -124,7 +148,12 @@ async def _validation_worker(
         if item is None:
             queue.task_done()
             return
-        _row_id, provider, resource_id, canonical_url = item
+        _row_id, provider, resource_id, canonical_url, source_name = item
+        source_counts = result.by_source.setdefault(
+            source_name,
+            {"selected": 0, "checked": 0, "public": 0, "restricted": 0, "dead": 0, "unknown": 0, "errors": 0},
+        )
+        source_counts["selected"] += 1
         try:
             status = await AccessChecker(settings, client).check(canonical_url)
             async with session_factory() as session:
@@ -133,8 +162,11 @@ async def _validation_worker(
                         session, settings=settings, check_access=False
                     ).update_access_status(provider, resource_id, status)
             result.checked += 1
+            source_counts["checked"] += 1
             setattr(result, status.value.lower(), getattr(result, status.value.lower()) + 1)
+            source_counts[status.value.lower()] += 1
         except Exception:
             result.errors += 1
+            source_counts["errors"] += 1
         finally:
             queue.task_done()

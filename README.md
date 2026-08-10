@@ -75,6 +75,10 @@ uv run gdpirate worker
 uv run gdpirate worker --once
 uv run gdpirate jobs
 uv run gdpirate run-job recent
+uv run gdpirate metrics
+uv run gdpirate metrics --hours 168 --json
+uv run gdpirate stats --by-source
+uv run gdpirate metrics-prune
 uv run gdpirate collector-state gdurl
 uv run gdpirate live-access-check
 uv run gdpirate serve
@@ -127,6 +131,24 @@ uv run gdpirate run-job recent
 The worker runs recent fresh-head collection, persistent feed polling, historical backfill, UNKNOWN validation, and stale PUBLIC revalidation. Partial collection failures are recorded in the job summary but use the normal interval when at least one source succeeds. If every configured source fails, the job is marked failed and bounded backoff applies. Heavy collectors (`gdurl`, `dedigger`, `commoncrawl`) and credentialed Korean APIs (`naver`, `daum`) are not scheduled by default.
 
 The FastAPI process does not run collectors, validation, or scheduling.
+
+## Private Metrics
+
+Operational metrics are private CLI-only telemetry. They are not exposed by the public website.
+
+```bash
+uv run gdpirate metrics
+uv run gdpirate metrics --hours 168
+uv run gdpirate metrics --json
+uv run gdpirate stats --by-source
+uv run gdpirate metrics-prune --keep-days 90
+```
+
+`metrics` reports historical aggregate run telemetry: one collection row per source run and one validation row per validation invocation. It stores counts, source keys/names, job names, timings, and status totals only. It does not store Google URLs, resource IDs, source URLs, candidate URLs, response bodies, or content.
+
+`stats --by-source` reports current database state grouped by the currently stored best source for each DriveLink. It is not complete discovery history.
+
+Bulk/deferred collectors such as `gdurl`, `dedigger`, and `commoncrawl` may show high UNKNOWN counts immediately after collection; their usefulness should be judged with later validation metrics.
 
 ## Docker Compose
 

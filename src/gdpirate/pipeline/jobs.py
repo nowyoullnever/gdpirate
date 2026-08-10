@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.database import SessionLocal
 from gdpirate.core.models import AccessStatus, ScheduledJobState, utc_now
-from gdpirate.pipeline.collection import CollectionRunner, CollectionStateMode
+from gdpirate.pipeline.collection import (
+    FRESH_HEAD_SOURCES,
+    CollectionRunner,
+    CollectionStateMode,
+    build_collectors,
+)
+from gdpirate.pipeline.metrics import MetricContext
 from gdpirate.pipeline.validation import validate_links
 
 
@@ -38,6 +44,7 @@ class JobConfig:
     stale_only: bool = False
     max_items: int | None = None
     concurrency: int | None = None
+    keep_days: int | None = None
 
 
 def load_jobs_config(path: str) -> list[JobConfig]:
@@ -160,14 +167,25 @@ class JobExecutor:
             self.settings, self.session_factory
         )
 
-    async def execute(self, job: JobConfig) -> dict:
+    async def execute(
+        self, job: JobConfig, *, metric_context: MetricContext | None = None
+    ) -> dict:
         if job.kind == "collect":
-            return await self._collect(job)
+            return await self._collect(job, metric_context=metric_context)
         if job.kind == "validate":
-            return await self._validate(job)
+            return await self._validate(job, metric_context=metric_context)
+        if job.kind == "prune_metrics":
+            from gdpirate.pipeline.metrics import prune_metrics
+
+            keep_days = job.keep_days or self.settings.metrics_retention_days
+            return await prune_metrics(
+                keep_days=keep_days, session_factory=self.session_factory
+            )
         raise ValueError(f"unknown job kind: {job.kind}")
 
-    async def _collect(self, job: JobConfig) -> dict:
+    async def _collect(
+        self, job: JobConfig, *, metric_context: MetricContext | None = None
+    ) -> dict:
         summary = {
             "sources": 0,
             "successful_sources": 0,
@@ -176,6 +194,7 @@ class JobExecutor:
             "candidates": 0,
             "created": 0,
             "duplicates": 0,
+            "access_checks": 0,
             "public": 0,
             "restricted": 0,
             "dead": 0,
@@ -189,6 +208,7 @@ class JobExecutor:
                     source,
                     max_items=job.max_items_per_source,
                     state_mode=job.state_mode,
+                    metric_context=metric_context,
                 )
             except Exception:
                 summary["errors"] += 1
@@ -202,12 +222,13 @@ class JobExecutor:
                     "candidates",
                     "created",
                     "duplicates",
+                    "access_checks",
                     "public",
                     "restricted",
                     "dead",
                     "unknown",
                 ):
-                    summary[key] += int(getattr(result, key))
+                    summary[key] += int(getattr(result, key, 0))
                 if result.error or result.unavailable:
                     summary["errors"] += 1
                     summary["failed_sources"] += 1
@@ -218,7 +239,9 @@ class JobExecutor:
             raise TotalCollectionFailure(failed_source_names, summary)
         return summary
 
-    async def _validate(self, job: JobConfig) -> dict:
+    async def _validate(
+        self, job: JobConfig, *, metric_context: MetricContext | None = None
+    ) -> dict:
         result = await validate_links(
             max_items=job.max_items,
             concurrency=job.concurrency,
@@ -226,30 +249,92 @@ class JobExecutor:
             stale_only=job.stale_only,
             settings=self.settings,
             session_factory=self.session_factory,
+            metric_context=metric_context,
         )
-        return result.__dict__.copy()
+        return {
+            key: value
+            for key, value in result.__dict__.items()
+            if key not in {"started_at", "finished_at", "by_source"}
+        }
 
 
 def _parse_job(item: dict) -> JobConfig:
     kind = str(item.get("kind") or "")
-    if kind not in {"collect", "validate"}:
+    if kind not in {"collect", "validate", "prune_metrics"}:
         raise ValueError(f"unknown job kind: {kind}")
+    name = str(item.get("name") or "").strip()
+    if not name:
+        raise ValueError("job name must not be empty")
+    interval_seconds = int(item.get("interval_seconds", 300))
+    if interval_seconds <= 0:
+        raise ValueError(f"job {name} interval_seconds must be positive")
     state_mode = str(item.get("state_mode") or "persistent")
     CollectionStateMode(state_mode)
+    sources = [str(source) for source in item.get("sources", [])]
+    max_items_per_source = item.get("max_items_per_source")
+    status = str(item.get("status", "UNKNOWN"))
+    max_items = item.get("max_items")
+    concurrency = item.get("concurrency")
+    keep_days = item.get("keep_days")
+
+    if kind == "collect":
+        _validate_collect_job(name, sources, state_mode, max_items_per_source)
+    elif kind == "validate":
+        _validate_validate_job(name, status, max_items, concurrency)
+    else:
+        if keep_days is not None and int(keep_days) <= 0:
+            raise ValueError(f"job {name} keep_days must be positive")
+
     return JobConfig(
-        name=str(item["name"]),
+        name=name,
         kind=kind,
         enabled=bool(item.get("enabled", True)),
-        interval_seconds=int(item.get("interval_seconds", 300)),
-        sources=[str(source) for source in item.get("sources", [])],
+        interval_seconds=interval_seconds,
+        sources=sources,
         state_mode=state_mode,
-        max_items_per_source=item.get("max_items_per_source"),
-        status=str(item.get("status", "UNKNOWN")),
+        max_items_per_source=max_items_per_source,
+        status=status,
         stale_only=bool(item.get("stale_only", False)),
-        max_items=item.get("max_items"),
-        concurrency=item.get("concurrency"),
+        max_items=max_items,
+        concurrency=concurrency,
+        keep_days=keep_days,
     )
 
 
 def _bounded_result(result: dict) -> dict:
     return {str(key): value for key, value in result.items() if isinstance(value, int | str | bool | float | type(None))}
+
+
+def _validate_collect_job(
+    name: str, sources: list[str], state_mode: str, max_items_per_source: int | None
+) -> None:
+    if not sources:
+        raise ValueError(f"job {name} collect sources must not be empty")
+    if len(sources) != len(set(sources)):
+        raise ValueError(f"job {name} collect sources must be unique")
+    known_sources = set(build_collectors().keys())
+    unknown = sorted(set(sources) - known_sources)
+    if unknown:
+        raise ValueError(f"job {name} unknown collectors: {', '.join(unknown)}")
+    if state_mode == CollectionStateMode.FRESH_HEAD and any(
+        source not in FRESH_HEAD_SOURCES for source in sources
+    ):
+        raise ValueError(f"job {name} contains non-fresh-head source")
+    if max_items_per_source is not None and int(max_items_per_source) <= 0:
+        raise ValueError(f"job {name} max_items_per_source must be positive")
+
+
+def _validate_validate_job(
+    name: str,
+    status: str,
+    max_items: int | None,
+    concurrency: int | None,
+) -> None:
+    try:
+        AccessStatus[status.upper()]
+    except KeyError as exc:
+        raise ValueError(f"job {name} invalid validation status: {status}") from exc
+    if max_items is not None and int(max_items) <= 0:
+        raise ValueError(f"job {name} max_items must be positive")
+    if concurrency is not None and int(concurrency) <= 0:
+        raise ValueError(f"job {name} concurrency must be positive")
