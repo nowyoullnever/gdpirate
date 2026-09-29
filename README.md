@@ -94,6 +94,11 @@ uv run gdpirate serve
 
 The local app listens on `http://127.0.0.1:8000` by default. `GET /healthz` is process liveness. `GET /readyz` performs a lightweight database/schema readiness check. `GET /api/random` returns one verified public Drive URL and its source with `Cache-Control: no-store`, or `503 {"error":"no_verified_public_link_available"}` when no eligible row exists or the database is unavailable.
 
+## Public UI
+
+The public GitHub Pages UI lives at `https://nowyoullnever.github.io/gdpirate/`.
+It is currently a minimal static UI shell. Backend `/api/random` integration is intentionally a later step.
+
 ## Local SQLite
 
 SQLite remains supported for local development and tests:
