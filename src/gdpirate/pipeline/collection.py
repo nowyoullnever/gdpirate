@@ -60,6 +60,7 @@ class CollectionResult:
     restricted: int = 0
     dead: int = 0
     unknown: int = 0
+    access_reasons: dict | None = None
     access_checks: int = 0
     duration_ms: int = 0
     started_at: datetime | None = None
@@ -222,6 +223,7 @@ class CollectionRunner:
         state_mode: CollectionStateMode = CollectionStateMode.PERSISTENT,
     ) -> CollectionResult:
         result = CollectionResult(source=source)
+        result.access_reasons = {}
         result.state_mode = state_mode.value
         result.started_at = datetime.now(UTC)
         monotonic_started = time.monotonic()
@@ -305,7 +307,7 @@ class CollectionRunner:
                     )
                     ingestion = await service.ingest_with_policy(candidate, policy)
             if ingestion.valid and ingestion.access_check_needed:
-                status = await AccessChecker(self.settings, client).check(
+                check_result = await AccessChecker(self.settings, client).check_detailed(
                     ingestion.canonical_url or candidate.raw_url
                 )
                 async with self.session_factory() as session:
@@ -318,10 +320,13 @@ class CollectionRunner:
                         )
                         if ingestion.provider and ingestion.resource_id:
                             await service.update_access_status(
-                                ingestion.provider, ingestion.resource_id, status
+                                ingestion.provider, ingestion.resource_id, check_result
                             )
-                ingestion = IngestionResultWithStatus(ingestion, status)
+                ingestion = IngestionResultWithStatus(ingestion, check_result)
                 result.access_checks += 1
+                reasons = result.access_reasons or {}
+                reasons[check_result.reason] = reasons.get(check_result.reason, 0) + 1
+                result.access_reasons = reasons
             if ingestion.valid:
                 result.candidates += 1
                 result.created += int(ingestion.created)
@@ -332,9 +337,11 @@ class CollectionRunner:
 
 
 class IngestionResultWithStatus:
-    def __init__(self, original, status):
+    def __init__(self, original, check_result):
         self.__dict__.update(original.__dict__)
-        self.access_status = status
+        self.access_status = check_result.status
+        self.access_reason = check_result.reason
+        self.access_check_version = check_result.checker_version
 
 
 def _credential_source_status(enabled: bool, configured: bool) -> str:

@@ -28,6 +28,8 @@ class ValidationResult:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     by_source: dict | None = None
+    reason_counts: dict | None = None
+    transition_counts: dict | None = None
 
 
 async def validate_links(
@@ -47,8 +49,10 @@ async def validate_links(
     result = ValidationResult()
     result.started_at = datetime.now(UTC)
     result.by_source = {}
+    result.reason_counts = {}
+    result.transition_counts = {}
     monotonic_started = time.monotonic()
-    queue: asyncio.Queue[tuple[int, str, str, str, str] | None] = asyncio.Queue(
+    queue: asyncio.Queue[tuple[int, str, str, str, str, str] | None] = asyncio.Queue(
         maxsize=concurrency
     )
 
@@ -116,23 +120,32 @@ async def _select_validation_rows(
         DriveLink.resource_id,
         DriveLink.canonical_url,
         DriveLink.source_name,
+        DriveLink.access_status,
     ).where(DriveLink.access_status == status, DriveLink.id > last_id)
     if source:
         stmt = stmt.where(DriveLink.source_name == source)
     if stale_only:
-        cutoff = datetime.now(UTC) - timedelta(hours=settings.access_recheck_hours)
+        recheck_hours = (
+            settings.unknown_recheck_hours
+            if status == AccessStatus.UNKNOWN
+            else settings.access_recheck_hours
+        )
+        cutoff = datetime.now(UTC) - timedelta(hours=recheck_hours)
         stmt = stmt.where(DriveLink.last_checked_at.is_not(None)).where(
             DriveLink.last_checked_at < cutoff
         )
     elif status == AccessStatus.UNKNOWN:
-        stmt = stmt.where(DriveLink.last_checked_at.is_(None))
+        cutoff = datetime.now(UTC) - timedelta(hours=settings.unknown_recheck_hours)
+        stmt = stmt.where(
+            (DriveLink.last_checked_at.is_(None)) | (DriveLink.last_checked_at < cutoff)
+        )
     stmt = stmt.order_by(DriveLink.id)
     if limit is not None:
         stmt = stmt.limit(limit)
     rows = await session.execute(stmt)
     return [
-        (row_id, provider, resource_id, canonical_url, source_name)
-        for row_id, provider, resource_id, canonical_url, source_name in rows
+        (row_id, provider, resource_id, canonical_url, source_name, old_status)
+        for row_id, provider, resource_id, canonical_url, source_name, old_status in rows
     ]
 
 
@@ -148,23 +161,35 @@ async def _validation_worker(
         if item is None:
             queue.task_done()
             return
-        _row_id, provider, resource_id, canonical_url, source_name = item
+        _row_id, provider, resource_id, canonical_url, source_name, old_status = item
         source_counts = result.by_source.setdefault(
             source_name,
             {"selected": 0, "checked": 0, "public": 0, "restricted": 0, "dead": 0, "unknown": 0, "errors": 0},
         )
         source_counts["selected"] += 1
         try:
-            status = await AccessChecker(settings, client).check(canonical_url)
+            check_result = await AccessChecker(settings, client).check_detailed(canonical_url)
             async with session_factory() as session:
                 async with session.begin():
                     await IngestionService(
                         session, settings=settings, check_access=False
-                    ).update_access_status(provider, resource_id, status)
+                    ).update_access_status(provider, resource_id, check_result)
             result.checked += 1
             source_counts["checked"] += 1
+            status = check_result.status
             setattr(result, status.value.lower(), getattr(result, status.value.lower()) + 1)
             source_counts[status.value.lower()] += 1
+            source_counts.setdefault("reasons", {})
+            source_counts["reasons"][check_result.reason] = (
+                source_counts["reasons"].get(check_result.reason, 0) + 1
+            )
+            result.reason_counts[check_result.reason] = (
+                result.reason_counts.get(check_result.reason, 0) + 1
+            )
+            transition = f"{old_status.value}->{status.value}"
+            result.transition_counts[transition] = (
+                result.transition_counts.get(transition, 0) + 1
+            )
         except Exception:
             result.errors += 1
             source_counts["errors"] += 1

@@ -60,6 +60,8 @@ class DriveLink(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    last_check_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    access_check_version: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
@@ -135,6 +137,7 @@ class CollectionRunMetric(Base):
     restricted: Mapped[int] = mapped_column(nullable=False, default=0)
     dead: Mapped[int] = mapped_column(nullable=False, default=0)
     unknown: Mapped[int] = mapped_column(nullable=False, default=0)
+    access_reasons_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     unavailable: Mapped[bool] = mapped_column(nullable=False, default=False)
     success: Mapped[bool] = mapped_column(nullable=False, default=True)
 
@@ -163,3 +166,5 @@ class ValidationRunMetric(Base):
     unknown: Mapped[int] = mapped_column(nullable=False, default=0)
     errors: Mapped[int] = mapped_column(nullable=False, default=0)
     by_source_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reason_counts_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    transition_counts_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

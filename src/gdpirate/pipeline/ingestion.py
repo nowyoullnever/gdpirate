@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gdpirate.collectors.base import CandidateLink
-from gdpirate.core.access_check import AccessChecker
+from gdpirate.core.access_check import ACCESS_CHECK_VERSION, AccessChecker, AccessCheckResult
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import ParsedGoogleUrl, canonical_url, parse_google_url
 from gdpirate.core.models import AccessStatus, DriveLink
@@ -35,6 +35,8 @@ class IngestionResult:
     created: bool = False
     duplicate: bool = False
     access_status: AccessStatus = AccessStatus.UNKNOWN
+    access_reason: str | None = None
+    access_check_version: int | None = None
     canonical_url: str | None = None
     provider: str | None = None
     resource_id: str | None = None
@@ -109,8 +111,9 @@ class IngestionService:
             and self.check_access
             and self._should_check_access(link, created)
         ):
-            link.access_status = await self.access_checker.check(link.canonical_url)
-            link.last_checked_at = datetime.now(UTC)
+            self._apply_access_result(
+                link, await _check_detailed(self.access_checker, link.canonical_url)
+            )
 
         await self.session.flush()
         return IngestionResult(
@@ -118,6 +121,8 @@ class IngestionService:
             created=created,
             duplicate=not created,
             access_status=link.access_status,
+            access_reason=link.last_check_reason,
+            access_check_version=link.access_check_version,
             canonical_url=link.canonical_url,
             provider=link.provider,
             resource_id=link.resource_id,
@@ -136,19 +141,34 @@ class IngestionService:
         return cls._lock_stripes[hash((provider, resource_id)) % len(cls._lock_stripes)]
 
     async def update_access_status(
-        self, provider: str, resource_id: str, status: AccessStatus
+        self,
+        provider: str,
+        resource_id: str,
+        result: AccessCheckResult | AccessStatus,
     ) -> None:
-        result = await self.session.execute(
+        row_result = await self.session.execute(
             select(DriveLink).where(
                 DriveLink.provider == provider,
                 DriveLink.resource_id == resource_id,
             )
         )
-        link = result.scalar_one_or_none()
+        link = row_result.scalar_one_or_none()
         if link is not None:
-            link.access_status = status
-            link.last_checked_at = datetime.now(UTC)
+            self._apply_access_result(link, result)
             await self.session.flush()
+
+    def _apply_access_result(
+        self, link: DriveLink, result: AccessCheckResult | AccessStatus
+    ) -> None:
+        if isinstance(result, AccessStatus):
+            link.access_status = result
+            link.last_check_reason = None
+            link.access_check_version = None
+        else:
+            link.access_status = result.status
+            link.last_check_reason = result.reason
+            link.access_check_version = result.checker_version
+        link.last_checked_at = datetime.now(UTC)
 
     def _should_check_access(self, link: DriveLink, created: bool) -> bool:
         if created or link.last_checked_at is None:
@@ -208,3 +228,13 @@ async def count_drive_links_by_status(session: AsyncSession) -> dict[AccessStatu
     for status, count in result.all():
         counts[status] = int(count)
     return counts
+
+
+async def _check_detailed(checker, canonical_url: str) -> AccessCheckResult:
+    if (
+        type(checker).check is not AccessChecker.check
+        and type(checker).check_detailed is AccessChecker.check_detailed
+    ):
+        status = await checker.check(canonical_url)
+        return AccessCheckResult(status, "legacy_checker", ACCESS_CHECK_VERSION)
+    return await checker.check_detailed(canonical_url)

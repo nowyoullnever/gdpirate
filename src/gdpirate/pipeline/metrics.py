@@ -63,6 +63,7 @@ async def record_collection_metrics(
                             restricted=result.restricted,
                             dead=result.dead,
                             unknown=result.unknown,
+                            access_reasons_json=getattr(result, "access_reasons", None),
                             unavailable=result.unavailable,
                             success=not bool(result.error or result.unavailable),
                         )
@@ -105,6 +106,8 @@ async def record_validation_metric(
                         unknown=result.unknown,
                         errors=result.errors,
                         by_source_json=result.by_source,
+                        reason_counts_json=result.reason_counts,
+                        transition_counts_json=result.transition_counts,
                     )
                 )
     except Exception:
@@ -136,6 +139,7 @@ async def metrics_summary(
                 func.sum(CollectionRunMetric.dead),
                 func.sum(CollectionRunMetric.unknown),
                 func.sum(case((CollectionRunMetric.success.is_(False), 1), else_=0)),
+                func.sum(CollectionRunMetric.duration_ms),
             ).where(CollectionRunMetric.started_at >= since)
             if source:
                 stmt = stmt.where(CollectionRunMetric.source == source)
@@ -183,6 +187,136 @@ async def stats_by_source(
     return sorted(grouped.values(), key=lambda item: item["total"], reverse=True)
 
 
+async def source_report(
+    *,
+    hours: float,
+    session_factory: async_sessionmaker | None = None,
+) -> list[dict]:
+    session_factory = session_factory or SessionLocal
+    since = utc_now() - timedelta(hours=hours)
+    async with session_factory() as session:
+        rows = await session.execute(
+            select(
+                CollectionRunMetric.source,
+                CollectionRunMetric.state_mode,
+                func.count(CollectionRunMetric.id),
+                func.sum(CollectionRunMetric.scanned),
+                func.sum(CollectionRunMetric.candidates),
+                func.sum(CollectionRunMetric.created),
+                func.sum(CollectionRunMetric.duplicates),
+                func.sum(CollectionRunMetric.access_checks),
+                func.sum(CollectionRunMetric.public),
+                func.sum(CollectionRunMetric.restricted),
+                func.sum(CollectionRunMetric.dead),
+                func.sum(CollectionRunMetric.unknown),
+                func.sum(CollectionRunMetric.duration_ms),
+            )
+            .where(CollectionRunMetric.started_at >= since)
+            .group_by(CollectionRunMetric.source, CollectionRunMetric.state_mode)
+            .order_by(CollectionRunMetric.source, CollectionRunMetric.state_mode)
+        )
+    report = []
+    for row in rows:
+        (
+            source,
+            state_mode,
+            runs,
+            scanned,
+            candidates,
+            created,
+            duplicates,
+            access_checks,
+            public,
+            restricted,
+            dead,
+            unknown,
+            duration_ms,
+        ) = row
+        item = {
+            "source": source,
+            "state_mode": state_mode,
+            "runs": int(runs or 0),
+            "scanned": int(scanned or 0),
+            "candidates": int(candidates or 0),
+            "created": int(created or 0),
+            "duplicates": int(duplicates or 0),
+            "access_checks": int(access_checks or 0),
+            "public": int(public or 0),
+            "restricted": int(restricted or 0),
+            "dead": int(dead or 0),
+            "unknown": int(unknown or 0),
+            "duration_ms": int(duration_ms or 0),
+        }
+        resolved = item["public"] + item["restricted"] + item["dead"]
+        item["candidates_per_1000_scanned"] = _per_1000(item["candidates"], item["scanned"])
+        item["new_per_1000_scanned"] = _per_1000(item["created"], item["scanned"])
+        item["public_per_1000_scanned"] = _per_1000(item["public"], item["scanned"])
+        item["public_per_100_access_checks"] = _per_100(item["public"], item["access_checks"])
+        item["duplicate_rate"] = _rate(item["duplicates"], item["candidates"])
+        item["unknown_rate"] = _rate(item["unknown"], item["access_checks"])
+        item["dead_rate"] = _rate(item["dead"], item["access_checks"])
+        item["resolved_public_rate"] = _rate(item["public"], resolved)
+        item["mean_duration_ms"] = _rate(item["duration_ms"], item["runs"])
+        item["checks_per_public"] = _rate(item["access_checks"], item["public"])
+        report.append(item)
+    return report
+
+
+async def pool_health(
+    *,
+    stale_hours: int = 24,
+    session_factory: async_sessionmaker | None = None,
+) -> dict:
+    session_factory = session_factory or SessionLocal
+    stale_before = utc_now() - timedelta(hours=stale_hours)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(DriveLink.access_status, func.count(DriveLink.id)).group_by(
+                    DriveLink.access_status
+                )
+            )
+        ).all()
+        fresh_public = await session.scalar(
+            select(func.count(DriveLink.id))
+            .where(DriveLink.access_status == AccessStatus.PUBLIC)
+            .where(
+                (DriveLink.last_checked_at.is_(None))
+                | (DriveLink.last_checked_at >= stale_before)
+            )
+        )
+        stale_public = await session.scalar(
+            select(func.count(DriveLink.id))
+            .where(DriveLink.access_status == AccessStatus.PUBLIC)
+            .where(DriveLink.last_checked_at.is_not(None))
+            .where(DriveLink.last_checked_at < stale_before)
+        )
+        public_with_valid_source = await session.scalar(
+            select(func.count(DriveLink.id))
+            .where(DriveLink.access_status == AccessStatus.PUBLIC)
+            .where(DriveLink.source_url.is_not(None))
+        )
+    counts = {status.value.lower(): 0 for status in AccessStatus}
+    total = 0
+    for status, count in rows:
+        counts[status.value.lower()] = int(count)
+        total += int(count)
+    status = "ready"
+    if counts["public"] == 0:
+        status = "empty"
+    elif int(public_with_valid_source or 0) < 10 or int(stale_public or 0) > int(fresh_public or 0):
+        status = "degraded"
+    return {
+        "status": status,
+        "total": total,
+        **counts,
+        "fresh_public": int(fresh_public or 0),
+        "stale_public": int(stale_public or 0),
+        "public_with_valid_source": int(public_with_valid_source or 0),
+        "stale_hours": stale_hours,
+    }
+
+
 async def prune_metrics(
     *,
     keep_days: int,
@@ -224,6 +358,7 @@ def _collection_row(row) -> dict:
         dead,
         unknown,
         errors,
+        duration_ms,
     ) = row
     item = {
         "source": source,
@@ -238,6 +373,7 @@ def _collection_row(row) -> dict:
         "dead": int(dead or 0),
         "unknown": int(unknown or 0),
         "errors": int(errors or 0),
+        "duration_ms": int(duration_ms or 0),
     }
     resolved = item["public"] + item["restricted"] + item["dead"]
     item["candidate_rate"] = _rate(item["candidates"], item["scanned"])
@@ -258,6 +394,8 @@ def _validation_summary(rows: list[ValidationRunMetric]) -> dict:
         "unknown": sum(row.unknown for row in rows),
         "errors": sum(row.errors for row in rows),
         "by_source": {},
+        "reasons": {},
+        "transitions": {},
     }
     resolved = summary["public"] + summary["restricted"] + summary["dead"]
     summary["public_rate"] = _rate(summary["public"], resolved)
@@ -269,6 +407,12 @@ def _validation_summary(rows: list[ValidationRunMetric]) -> dict:
             )
             for key in target:
                 target[key] += int(values.get(key, 0))
+        for reason, count in (row.reason_counts_json or {}).items():
+            summary["reasons"][reason] = summary["reasons"].get(reason, 0) + int(count)
+        for transition, count in (row.transition_counts_json or {}).items():
+            summary["transitions"][transition] = (
+                summary["transitions"].get(transition, 0) + int(count)
+            )
     return summary
 
 
@@ -276,3 +420,13 @@ def _rate(numerator: int, denominator: int) -> float | None:
     if denominator <= 0:
         return None
     return numerator / denominator
+
+
+def _per_1000(numerator: int, denominator: int) -> float | None:
+    rate = _rate(numerator, denominator)
+    return None if rate is None else rate * 1000
+
+
+def _per_100(numerator: int, denominator: int) -> float | None:
+    rate = _rate(numerator, denominator)
+    return None if rate is None else rate * 100

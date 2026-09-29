@@ -26,9 +26,12 @@ from gdpirate.pipeline.validation import validate_links
 from gdpirate.pipeline.metrics import (
     MetricContext,
     metrics_summary,
+    pool_health,
     prune_metrics,
+    source_report,
     stats_by_source,
 )
+from gdpirate.pipeline.recalibration import recalibrate_access
 from gdpirate.collectors.commoncrawl import fetch_collinfo
 from gdpirate.config import get_settings
 from gdpirate.core.http import HttpClientFactory
@@ -60,8 +63,10 @@ def parse_url(url: str) -> None:
 @app.command("check-url")
 def check_url(url: str) -> None:
     async def run() -> None:
-        status = await AccessChecker().check(url)
-        typer.echo(status.value)
+        result = await AccessChecker().check_detailed(url)
+        typer.echo(
+            f"{result.status.value} reason={result.reason} version={result.checker_version}"
+        )
 
     asyncio.run(run())
 
@@ -279,6 +284,33 @@ def validate(
     asyncio.run(run())
 
 
+@app.command("recalibrate-access")
+def recalibrate_access_command(
+    max_items: int | None = typer.Option(None, "--max-items"),
+    concurrency: int | None = typer.Option(None, "--concurrency"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    async def run() -> None:
+        result = await recalibrate_access(max_items=max_items, concurrency=concurrency)
+        payload = {
+            "selected": result.selected,
+            "checked": result.checked,
+            "errors": result.errors,
+            "statuses": result.statuses,
+            "transitions": result.transitions,
+            "duration_ms": result.duration_ms,
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, default=str))
+            return
+        for key in ("selected", "checked", "errors", "duration_ms"):
+            typer.echo(f"{key}={payload[key]}")
+        typer.echo(f"statuses={payload['statuses']}")
+        typer.echo(f"transitions={payload['transitions']}")
+
+    asyncio.run(run())
+
+
 @app.command("metrics")
 def metrics(
     hours: float = typer.Option(24, "--hours"),
@@ -318,6 +350,55 @@ def metrics(
                         f"{source_name}\t{counts['checked']}\t{counts['public']}\t"
                         f"{counts['restricted']}\t{counts['dead']}\t{counts['unknown']}\t{counts['errors']}"
                     )
+            if validation.get("reasons"):
+                typer.echo(f"reasons: {validation['reasons']}")
+            if validation.get("transitions"):
+                typer.echo(f"transitions: {validation['transitions']}")
+
+    asyncio.run(run())
+
+
+@app.command("source-report")
+def source_report_command(
+    hours: float = typer.Option(24, "--hours"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    async def run() -> None:
+        rows = await source_report(hours=hours)
+        if json_output:
+            typer.echo(json.dumps({"sources": rows}, default=str))
+            return
+        typer.echo(
+            "Source\tMode\tRuns\tScanned\tCandidates\tNew\tDup\tChecks\tPublic\tRestr.\tDead\tUnknown\tCand/1k\tNew/1k\tPublic/100checks\tDupRate\tUnknownRate\tDeadRate\tMeanMs"
+        )
+        for row in rows:
+            typer.echo(
+                f"{row['source']}\t{row['state_mode']}\t{row['runs']}\t{row['scanned']}\t"
+                f"{row['candidates']}\t{row['created']}\t{row['duplicates']}\t"
+                f"{row['access_checks']}\t{row['public']}\t{row['restricted']}\t"
+                f"{row['dead']}\t{row['unknown']}\t"
+                f"{_fmt_number(row['candidates_per_1000_scanned'])}\t"
+                f"{_fmt_number(row['new_per_1000_scanned'])}\t"
+                f"{_fmt_number(row['public_per_100_access_checks'])}\t"
+                f"{_fmt_rate(row['duplicate_rate'])}\t{_fmt_rate(row['unknown_rate'])}\t"
+                f"{_fmt_rate(row['dead_rate'])}\t{_fmt_number(row['mean_duration_ms'])}"
+            )
+
+    asyncio.run(run())
+
+
+@app.command("pool-health")
+def pool_health_command(
+    stale_hours: int = typer.Option(24, "--stale-hours"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    async def run() -> None:
+        payload = await pool_health(stale_hours=stale_hours)
+        if json_output:
+            typer.echo(json.dumps(payload, default=str))
+            return
+        for key, value in payload.items():
+            typer.echo(f"{key}={value}")
 
     asyncio.run(run())
 
@@ -382,8 +463,10 @@ def live_access_check() -> None:
             if not url:
                 typer.echo(f"{name}: skipped")
                 continue
-            status = await checker.check(url)
-            typer.echo(f"{name}: {status.value}")
+            result = await checker.check_detailed(url)
+            typer.echo(
+                f"{name}: {result.status.value} reason={result.reason} version={result.checker_version}"
+            )
 
     asyncio.run(run())
 
@@ -399,6 +482,12 @@ def _fmt_rate(value) -> str:
     if value is None:
         return "n/a"
     return f"{value * 100:.1f}%"
+
+
+def _fmt_number(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}"
 
 
 if __name__ == "__main__":

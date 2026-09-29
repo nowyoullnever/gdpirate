@@ -8,7 +8,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from gdpirate.config import Settings, get_settings
-from gdpirate.core.access_check import AccessChecker
+from gdpirate.core.access_check import ACCESS_CHECK_VERSION, AccessChecker, AccessCheckResult
 from gdpirate.core.database import SessionLocal
 from gdpirate.core.models import AccessStatus, DriveLink, utc_now
 from gdpirate.core.source_urls import normalize_source_url
@@ -48,8 +48,8 @@ class RandomLinkService:
             if not _is_stale(row.last_checked_at, stale_before):
                 return _random_link(row, source_url)
 
-            status = await self.access_checker.check(row.canonical_url)
-            fresh_row = await self._update_status(row.id, status)
+            check_result = await _check_detailed(self.access_checker, row.canonical_url)
+            fresh_row = await self._update_status(row.id, check_result)
             if fresh_row is not None and fresh_row.access_status == AccessStatus.PUBLIC:
                 fresh_source_url = normalize_source_url(fresh_row.source_url)
                 if fresh_source_url is not None:
@@ -77,14 +77,16 @@ class RandomLinkService:
             ).scalar_one_or_none()
 
     async def _update_status(
-        self, link_id: int, status: AccessStatus
+        self, link_id: int, check_result: AccessCheckResult
     ) -> DriveLink | None:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await session.get(DriveLink, link_id)
                 if row is None:
                     return None
-                row.access_status = status
+                row.access_status = check_result.status
+                row.last_check_reason = check_result.reason
+                row.access_check_version = check_result.checker_version
                 row.last_checked_at = utc_now()
                 row.updated_at = utc_now()
             return row
@@ -111,3 +113,13 @@ def _random_link(row: DriveLink, source_url: str) -> RandomLink:
         source_name=row.source_name,
         source_url=source_url,
     )
+
+
+async def _check_detailed(checker, canonical_url: str) -> AccessCheckResult:
+    if not hasattr(checker, "check_detailed") or (
+        type(checker).check is not AccessChecker.check
+        and type(checker).check_detailed is AccessChecker.check_detailed
+    ):
+        status = await checker.check(canonical_url)
+        return AccessCheckResult(status, "legacy_checker", ACCESS_CHECK_VERSION)
+    return await checker.check_detailed(canonical_url)

@@ -39,7 +39,7 @@ async def test_classifies_html_responses(body, expected):
 
 
 @respx.mock
-async def test_classifies_sign_in_redirect_as_restricted():
+async def test_ambiguous_sign_in_text_is_not_restricted_without_redirect():
     url = "https://drive.google.com/file/d/ABC123/view"
     respx.get(url).mock(
         return_value=httpx.Response(
@@ -50,7 +50,10 @@ async def test_classifies_sign_in_redirect_as_restricted():
         )
     )
 
-    assert await AccessChecker(settings()).check(url) == AccessStatus.RESTRICTED
+    result = await AccessChecker(settings()).check_detailed(url)
+
+    assert result.status == AccessStatus.UNKNOWN
+    assert result.reason == "ambiguous_html"
 
 
 @pytest.mark.parametrize(

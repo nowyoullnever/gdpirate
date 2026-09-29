@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 import httpx
 
@@ -10,6 +11,8 @@ from gdpirate.core.models import AccessStatus
 
 logger = logging.getLogger(__name__)
 
+ACCESS_CHECK_VERSION = 2
+
 RESTRICTED_MARKERS = (
     "request access",
     "access denied",
@@ -18,8 +21,6 @@ RESTRICTED_MARKERS = (
     "you do not have permission",
     "ask for access",
     "access request",
-    "sign in",
-    "signin",
     "accounts.google.com",
     "ServiceLogin",
 )
@@ -27,21 +28,20 @@ DEAD_MARKERS = (
     "file does not exist",
     "sorry, unable to open the file",
     "document not found",
-    "cannot find",
-    "not found",
-    "404",
 )
 PUBLIC_MARKERS = (
     "drive-viewer",
     "docs-homescreen",
     "docs-title",
     "viewerng",
-    "download",
-    "preview",
-    "Google Docs",
-    "Google Sheets",
-    "Google Slides",
 )
+
+
+@dataclass(frozen=True)
+class AccessCheckResult:
+    status: AccessStatus
+    reason: str
+    checker_version: int = ACCESS_CHECK_VERSION
 
 
 class AccessChecker:
@@ -54,9 +54,12 @@ class AccessChecker:
         self._client = client
 
     async def check(self, raw_url: str) -> AccessStatus:
+        return (await self.check_detailed(raw_url)).status
+
+    async def check_detailed(self, raw_url: str) -> AccessCheckResult:
         parsed = parse_google_url(raw_url)
         if not parsed:
-            return AccessStatus.UNKNOWN
+            return AccessCheckResult(AccessStatus.UNKNOWN, "invalid_google_url")
 
         try:
             if self._client is not None:
@@ -66,11 +69,11 @@ class AccessChecker:
                 return await self._check_with_client(client, parsed.canonical_url)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.TooManyRedirects) as exc:
             logger.warning("access check failed for %s: %s", parsed.canonical_url, exc)
-            return AccessStatus.UNKNOWN
+            return AccessCheckResult(AccessStatus.UNKNOWN, "network_error")
 
     async def _check_with_client(
         self, client: httpx.AsyncClient, canonical_url: str
-    ) -> AccessStatus:
+    ) -> AccessCheckResult:
         headers = {
             "Range": f"bytes=0-{self.settings.access_check_max_body_bytes - 1}"
         }
@@ -82,7 +85,7 @@ class AccessChecker:
                 body=b"",
                 body_complete=False,
             )
-            if initial != AccessStatus.UNKNOWN:
+            if initial.status != AccessStatus.UNKNOWN:
                 return initial
 
             body = bytearray()
@@ -105,6 +108,12 @@ class AccessChecker:
 
 
 def classify_response(response: httpx.Response, max_body_bytes: int) -> AccessStatus:
+    return classify_response_detailed(response, max_body_bytes).status
+
+
+def classify_response_detailed(
+    response: httpx.Response, max_body_bytes: int
+) -> AccessCheckResult:
     return classify_limited_response(
         status_code=response.status_code,
         final_url=str(response.url),
@@ -123,37 +132,39 @@ def classify_limited_response(
     body: bytes,
     body_complete: bool,
     encoding: str | None = None,
-) -> AccessStatus:
+) -> AccessCheckResult:
     final_url_lower = final_url.lower()
 
     if status_code in {404, 410}:
-        return AccessStatus.DEAD
+        return AccessCheckResult(AccessStatus.DEAD, f"http_{status_code}")
     if status_code in {401, 403}:
-        return AccessStatus.RESTRICTED
+        return AccessCheckResult(AccessStatus.RESTRICTED, f"http_{status_code}")
     if status_code in {429, 500, 502, 503, 504}:
-        return AccessStatus.UNKNOWN
+        return AccessCheckResult(AccessStatus.UNKNOWN, f"http_{status_code}")
     if "accounts.google.com" in final_url_lower or "servicelogin" in final_url_lower:
-        return AccessStatus.RESTRICTED
+        return AccessCheckResult(AccessStatus.RESTRICTED, "login_redirect")
 
     content_type = headers.get("Content-Type", "").lower()
     disposition = headers.get("Content-Disposition", "").lower()
     if status_code in {200, 206} and (
         "attachment" in disposition or (content_type and not _looks_like_html(content_type))
     ):
-        return AccessStatus.PUBLIC
+        return AccessCheckResult(AccessStatus.PUBLIC, "binary_or_attachment")
 
     body_text = body.decode(encoding or "utf-8", errors="ignore")
     body_lower = body_text.lower()
 
-    if any(marker.lower() in body_lower for marker in DEAD_MARKERS):
-        return AccessStatus.DEAD
-    if any(marker.lower() in body_lower for marker in RESTRICTED_MARKERS):
-        return AccessStatus.RESTRICTED
-    if status_code in {200, 206} and any(
-        marker.lower() in body_lower for marker in PUBLIC_MARKERS
-    ):
-        return AccessStatus.PUBLIC
-    return AccessStatus.UNKNOWN
+    for marker in DEAD_MARKERS:
+        if marker.lower() in body_lower:
+            return AccessCheckResult(AccessStatus.DEAD, "explicit_missing")
+    for marker in RESTRICTED_MARKERS:
+        if marker.lower() in body_lower:
+            return AccessCheckResult(AccessStatus.RESTRICTED, "explicit_access_required")
+    if status_code in {200, 206}:
+        for marker in PUBLIC_MARKERS:
+            if marker.lower() in body_lower:
+                return AccessCheckResult(AccessStatus.PUBLIC, "public_viewer")
+    return AccessCheckResult(AccessStatus.UNKNOWN, "ambiguous_html")
 
 
 def _looks_like_html(content_type: str) -> bool:
