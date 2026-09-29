@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import DISCOVERY_TERMS, extract_google_urls
 from gdpirate.core.http import request_with_retries
@@ -18,14 +18,13 @@ class BlueskyCollector:
     async def collect(
         self, context: CollectorContext, *, max_items: int | None = None
     ) -> AsyncIterator[CandidateLink]:
-        emitted = 0
         endpoint = f"{self.settings.bluesky_api_base.rstrip('/')}/xrpc/app.bsky.feed.searchPosts"
         for term in DISCOVERY_TERMS:
             scope = f"search/{term}"
             state = context.get_cursor(scope)
             cursor = state.get("cursor")
             offset = int(state.get("offset", 0))
-            while max_items is None or emitted < max_items:
+            while True:
                 response = await request_with_retries(
                     context.client,
                     "GET",
@@ -52,18 +51,12 @@ class BlueskyCollector:
                         return
                     context.mark_scanned()
                     source_url = _bsky_source_url(post)
-                    for raw_url in _post_urls(post):
+                    for raw_url in distinct_google_urls(_post_urls(post)):
                         yield CandidateLink(
                             raw_url=raw_url,
                             source_name=self.source_name,
                             source_url=source_url,
                         )
-                        emitted += 1
-                        if max_items is not None and emitted >= max_items:
-                            await context.checkpoint(
-                                scope, {"cursor": cursor, "offset": index + 1}
-                            )
-                            return
                 cursor = payload.get("cursor")
                 offset = 0
                 await context.checkpoint(scope, {"cursor": cursor, "offset": 0})

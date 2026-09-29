@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 
 import httpx
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import extract_google_urls
 from gdpirate.core.robots import RobotsPolicy
@@ -58,9 +58,9 @@ class GdUrlCollector:
                     )
                     return
                 context.mark_scanned()
-                for raw_url in await resolve_gdurl_permalink(
+                for raw_url in distinct_google_urls(await resolve_gdurl_permalink(
                     context.client, permalink, self.settings.gdurl_resolve_max_body_bytes
-                ):
+                )):
                     yield CandidateLink(
                         raw_url=raw_url,
                         source_name=self.source_name,

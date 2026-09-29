@@ -6,7 +6,7 @@ import asyncio
 import tomllib
 from urllib.parse import urlencode
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import extract_google_urls
 from gdpirate.core.robots import RobotsPolicy
@@ -53,7 +53,7 @@ class DeDiggerCollector:
                     context.unavailable = True
                     context.error = "deDigger blocked or challenge page"
                     return
-                results = extract_google_urls(response.text)
+                results = distinct_google_urls(extract_google_urls(response.text))
                 if not results:
                     await context.checkpoint(scope, {"page": page, "offset": offset, "complete": True})
                     break

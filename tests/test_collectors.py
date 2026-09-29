@@ -105,7 +105,7 @@ async def test_bluesky_extracts_text_facets_and_external_embed():
             },
         )
 
-    items, _ = await collect_all(BlueskyCollector(Settings()), handler, max_items=3)
+    items, _ = await collect_all(BlueskyCollector(Settings()), handler, max_items=1)
 
     assert len(items) == 3
     assert items[0].source_url == "https://bsky.app/profile/example.test/post/rkey1"

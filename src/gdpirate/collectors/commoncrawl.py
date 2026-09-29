@@ -15,7 +15,7 @@ import duckdb
 import httpx
 from warcio.archiveiterator import ArchiveIterator
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import GOOGLE_HOSTS, extract_google_urls, parse_google_url
 
@@ -157,6 +157,17 @@ class CommonCrawlCollector:
                                 )
                                 return
                             context.mark_scanned()
+                            if max_items is not None and context.scanned >= max_items:
+                                await context.checkpoint(
+                                    scope,
+                                    {
+                                        "path_index": path_index,
+                                        "current_path": path,
+                                        "record_index": event["record_index"],
+                                        **_wat_metrics(context, scope),
+                                    },
+                                )
+                                return
                             if event["record_index"] % self.settings.commoncrawl_checkpoint_record_interval == 0:
                                 await context.checkpoint(
                                     scope,
@@ -174,17 +185,6 @@ class CommonCrawlCollector:
                         candidate = event["candidate"]
                         record_index = event["record_index"]
                         _inc_metric(context, scope, "google_candidates")
-                        if max_items is not None and _metric(context, scope, "google_candidates") > max_items:
-                            await context.checkpoint(
-                                scope,
-                                {
-                                    "path_index": path_index,
-                                    "current_path": path,
-                                    "record_index": record_index,
-                                    **_wat_metrics(context, scope),
-                                },
-                            )
-                            return
                         yield candidate
                 processed_files += 1
                 _inc_metric(context, scope, "files_processed")
@@ -354,7 +354,7 @@ async def iter_wat_events(
                 raw = link.get("url") or link.get("href") or link.get("path")
                 if not raw:
                     continue
-                for google_url in extract_google_urls(str(raw)):
+                for google_url in distinct_google_urls(extract_google_urls(str(raw))):
                     yield {
                         "type": "candidate",
                         "record_index": record_index,

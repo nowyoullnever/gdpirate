@@ -7,7 +7,7 @@ import json
 import tomllib
 from xml.etree import ElementTree
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import extract_google_urls
 from gdpirate.core.http import request_with_retries
@@ -23,7 +23,6 @@ class FeedCollector:
     async def collect(
         self, context: CollectorContext, *, max_items: int | None = None
     ) -> AsyncIterator[CandidateLink]:
-        emitted = 0
         for feed in _load_feed_config(self.settings.feed_config_path):
             feed_url = str(feed["url"])
             scope = feed_url
@@ -59,18 +58,12 @@ class FeedCollector:
                 context.mark_scanned()
                 processed_entry_keys.add(entry_key)
                 source_url = entry.source_url or feed_url
-                for raw_url in extract_google_urls(entry.text):
+                for raw_url in distinct_google_urls(extract_google_urls(entry.text)):
                     yield CandidateLink(
                         raw_url=raw_url,
                         source_name=str(feed.get("name") or self.source_name),
                         source_url=source_url,
                     )
-                    emitted += 1
-                    if max_items is not None and emitted >= max_items:
-                        await context.checkpoint(
-                            scope, _partial_feed_state(state, processed_entry_keys)
-                        )
-                        return
             latest = entries[0] if entries else None
             await context.checkpoint(scope, _feed_state(response, latest))
 

@@ -7,7 +7,7 @@ import tomllib
 
 import httpx
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import extract_google_urls
 from gdpirate.core.http import request_with_retries
@@ -44,7 +44,6 @@ class FediverseCollector:
     async def collect(
         self, context: CollectorContext, *, max_items: int | None = None
     ) -> AsyncIterator[CandidateLink]:
-        emitted = 0
         for instance in load_fediverse_instances(
             self.settings.fediverse_instance_config_path
         ):
@@ -63,7 +62,7 @@ class FediverseCollector:
                 continue
             scope = instance.url
             max_id = context.get_cursor(scope).get("max_id")
-            while max_items is None or emitted < max_items:
+            while True:
                 response = await request_with_retries(
                     context.client,
                     "GET",
@@ -97,16 +96,12 @@ class FediverseCollector:
                     next_max_id = status.get("id") or next_max_id
                     text = _status_text(status)
                     source_url = status.get("url") or status.get("uri")
-                    for raw_url in extract_google_urls(text):
+                    for raw_url in distinct_google_urls(extract_google_urls(text)):
                         yield CandidateLink(
                             raw_url=raw_url,
                             source_name=detection.source_name,
                             source_url=source_url,
                         )
-                        emitted += 1
-                        if max_items is not None and emitted >= max_items:
-                            await context.checkpoint(scope, {"max_id": max_id})
-                            return
                 max_id = next_max_id
                 await context.checkpoint(scope, {"max_id": max_id})
                 if not max_id:

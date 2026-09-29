@@ -6,7 +6,7 @@ import asyncio
 import html
 import tomllib
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.drive_urls import extract_google_urls
 from gdpirate.core.http import request_with_retries
@@ -100,7 +100,7 @@ class NaverCollector:
                                 for key in ("title", "description", "link")
                             )
                             source_url = item.get("link")
-                            for raw_url in extract_google_urls(text):
+                            for raw_url in distinct_google_urls(extract_google_urls(text)):
                                 yield CandidateLink(
                                     raw_url=raw_url,
                                     source_name=source_name,
@@ -178,7 +178,7 @@ class DaumCollector:
                                 for key in ("title", "contents", "url")
                             )
                             source_url = doc.get("url")
-                            for raw_url in extract_google_urls(text):
+                            for raw_url in distinct_google_urls(extract_google_urls(text)):
                                 yield CandidateLink(
                                     raw_url=raw_url,
                                     source_name=source_name,

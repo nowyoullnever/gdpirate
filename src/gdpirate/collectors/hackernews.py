@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.core.drive_urls import DISCOVERY_TERMS, extract_google_urls
 from gdpirate.core.http import request_with_retries
 
@@ -15,12 +15,11 @@ class HackerNewsCollector:
     async def collect(
         self, context: CollectorContext, *, max_items: int | None = None
     ) -> AsyncIterator[CandidateLink]:
-        emitted = 0
         for term in DISCOVERY_TERMS:
             for tag in ("story", "comment"):
                 scope = f"{tag}/{term}"
                 page = int(context.get_cursor(scope).get("page", 0))
-                while max_items is None or emitted < max_items:
+                while True:
                     response = await request_with_retries(
                         context.client,
                         "GET",
@@ -46,18 +45,12 @@ class HackerNewsCollector:
                             str(hit.get(key) or "")
                             for key in ("url", "title", "story_text", "comment_text")
                         )
-                        for raw_url in extract_google_urls(text):
+                        for raw_url in distinct_google_urls(extract_google_urls(text)):
                             yield CandidateLink(
                                 raw_url=raw_url,
                                 source_name=self.source_name,
                                 source_url=source_url,
                             )
-                            emitted += 1
-                            if max_items is not None and emitted >= max_items:
-                                await context.checkpoint(
-                                    scope, {"page": page, "offset": index}
-                                )
-                                return
                     page += 1
                     await context.checkpoint(scope, {"page": page, "offset": 0})
 

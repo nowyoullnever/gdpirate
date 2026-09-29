@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import websockets
 
-from gdpirate.collectors.base import CandidateLink, CollectorContext
+from gdpirate.collectors.base import CandidateLink, CollectorContext, distinct_google_urls
 from gdpirate.config import Settings, get_settings
 from gdpirate.core.bech32 import note_id_from_event_id
 from gdpirate.core.drive_urls import extract_google_urls
@@ -30,7 +30,6 @@ class NostrCollector:
     async def collect(
         self, context: CollectorContext, *, max_items: int | None = None
     ) -> AsyncIterator[CandidateLink]:
-        emitted = 0
         self._seen_event_ids = set()
         for relay in self.settings.nostr_relay_list:
             scope = relay
@@ -56,7 +55,7 @@ class NostrCollector:
                             ]
                         )
                     )
-                    while max_items is None or emitted < max_items:
+                    while True:
                         try:
                             message = await asyncio.wait_for(websocket.recv(), timeout=20)
                         except TimeoutError:
@@ -86,15 +85,14 @@ class NostrCollector:
                             source_url = nostr_source_url(
                                 self.settings.nostr_viewer_base, event_id
                             )
-                            for raw_url in extract_google_urls(text):
+                            for raw_url in distinct_google_urls(extract_google_urls(text)):
                                 yield CandidateLink(
                                     raw_url=raw_url,
                                     source_name=self.source_name,
                                     source_url=source_url,
                                 )
-                                emitted += 1
-                                if max_items is not None and emitted >= max_items:
-                                    return
+                            if max_items is not None and context.scanned >= max_items:
+                                return
                         elif msg_type == "EOSE":
                             if events_seen >= self.settings.nostr_batch_limit and oldest_seen == until:
                                 await context.checkpoint(
